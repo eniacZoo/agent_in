@@ -1,0 +1,16 @@
+{
+  "provider": "default",
+  "safe_mode": true,
+  "providers": {
+    "default": {
+      "base_url": "https://api.deepseek.com",
+      "api_key": "YOUR_API_KEY",
+      "model": "deepseek-v4.1-flash-expires-on-0910"
+    },
+    "office": {
+      "base_url": "http://127.0.0.1:8088/api/v1",
+      "api_key": "YOUR_OFFICE_KEY",
+      "model": "AngelOrDevil"
+    }
+  }
+}

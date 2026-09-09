@@ -1,0 +1,30 @@
+# 运行期产物，不进版本库
+temp/
+__pycache__/
+*.pyc
+*.pyo
+
+# 密钥与本机配置（复制 agent_config.example.json）
+agent_config.json
+.env
+.env.*
+
+# 会话、日志、用量、能力缓存
+logs/
+sessions/
+usage/
+capability_cache.json
+capability_cache.json.tmp
+memory/MEMORY.md
+skills/.trusted.json
+
+# 编辑器 / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# 历史临时产物
+_tmp_*.jpg
+tmp_pptx_img/

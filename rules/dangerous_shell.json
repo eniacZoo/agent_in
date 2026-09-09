@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "severities": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"],
+  "shell": {
+    "rules": [
+      {"id": "format_volume", "pattern": "(?i)\\bFormat-Volume\\b|\\bformat\\s+[a-zA-Z]:", "severity": "CRITICAL", "desc": "格式化磁盘"},
+      {"id": "diskpart", "pattern": "(?i)\\bdiskpart\\b", "severity": "CRITICAL", "desc": "磁盘分区"},
+      {"id": "mkfs", "pattern": "\\bmkfs(\\.|\\s|$)", "severity": "CRITICAL", "desc": "格式化文件系统"},
+      {"id": "dd_dev", "pattern": "\\bdd\\b[^|;&]*of=/?dev/", "severity": "CRITICAL", "desc": "dd 写裸设备"},
+      {"id": "redir_disk", "pattern": ">{1,2}\\s*/dev/(sd|nvme|hd)", "severity": "CRITICAL", "desc": "重定向到磁盘"},
+      {"id": "fork_bomb", "pattern": ":\\(\\)\\s*\\{\\s*:\\|:&\\s*\\}", "severity": "CRITICAL", "desc": "fork 炸弹"},
+      {"id": "rm_rf_root", "pattern": "\\brm\\s+(-[a-zA-Z]*\\s+)*/\\s*$", "severity": "CRITICAL", "desc": "删除根目录"},
+      {"id": "ps_rm_recurse", "pattern": "(?i)(Remove-Item|\\bri\\b)[^\\n|;]*-(Recurse|Force)", "severity": "HIGH", "desc": "PowerShell 递归/强制删除"},
+      {"id": "del_s", "pattern": "(?i)\\b(del|erase)\\s+/[sS]", "severity": "HIGH", "desc": "cmd 递归删除"},
+      {"id": "rd_s", "pattern": "(?i)\\b(rd|rmdir)\\s+/[sS]", "severity": "HIGH", "desc": "cmd 递归删目录"},
+      {"id": "rm_rf", "pattern": "\\brm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*\\s+)?-[a-zA-Z]*[fF]", "severity": "HIGH", "desc": "递归强制删除"},
+      {"id": "rm_r", "pattern": "\\brm\\s+-[a-zA-Z]*[rR][a-zA-Z]*", "severity": "HIGH", "desc": "递归删除"},
+      {"id": "iex", "pattern": "(?i)\\b(iex|Invoke-Expression)\\b", "severity": "HIGH", "desc": "动态执行代码"},
+      {"id": "clear_content", "pattern": "(?i)\\bClear-Content\\b", "severity": "MEDIUM", "desc": "清空文件内容"},
+      {"id": "sudo", "pattern": "\\bsudo\\b", "severity": "MEDIUM", "desc": "提权"},
+      {"id": "chmod_777", "pattern": "\\bchmod\\s+(777|-R\\s+777)", "severity": "MEDIUM", "desc": "宽松权限"},
+      {"id": "kill9", "pattern": "\\bkill\\s+(-9|-KILL)", "severity": "MEDIUM", "desc": "强杀进程"},
+      {"id": "pkg_install", "pattern": "(?i)(\\bpip3?\\s+install\\b|\\bpython(?:\\d+(?:\\.\\d+)*)?\\s+-m\\s+pip\\s+install\\b|\\bconda\\s+install\\b|\\bnpm\\s+install\\b)", "severity": "HIGH", "desc": "离线环境请用 vendor，禁止 pip/conda/npm install"}
+    ],
+    "evasion": {
+      "command_substitution": "HIGH",
+      "piped_download_exec": "CRITICAL",
+      "base64_decode_exec": "HIGH",
+      "var_split_assign": "HIGH",
+      "unicode_hex_escape": "MEDIUM",
+      "url_encoded_payload": "MEDIUM"
+    }
+  }
+}

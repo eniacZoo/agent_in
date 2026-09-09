@@ -1,0 +1,16 @@
+{
+  "name": "read_xlsx",
+  "version": "1.0",
+  "description": "用 stdlib 读取 .xlsx 前若干行（TSV）",
+  "trigger": "人用 /use read_xlsx <path> 触发",
+  "created": "2026-09-09",
+  "entry": "main.py",
+  "language": "python",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "xlsx 路径（相对工作目录）",
+      "required": true
+    }
+  }
+}

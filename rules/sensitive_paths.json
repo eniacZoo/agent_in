@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "protected_roots": [
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.kube",
+    "/etc",
+    "/boot",
+    "/dev",
+    "/sys",
+    "C:\\Windows",
+    "C:\\Windows\\System32"
+  ],
+  "critical_files": [
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    "~/.ssh/id_rsa",
+    "~/.ssh/id_ed25519",
+    "~/.aws/credentials"
+  ],
+  "sensitive_name_patterns": [
+    "\\.env$",
+    "id_rsa",
+    "id_ed25519",
+    "\\.pem$",
+    "credentials",
+    "\\.netrc$"
+  ]
+}
