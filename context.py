@@ -24,7 +24,9 @@ TOOLCALL_ARG_KEEP_CHARS = 200    # 旧 tool_call 大参数保留的前 N 字符
 SUMMARIZE_RATIO = 0.80          # > context_limit * 0.8 触发摘要
 OVERFLOW_RATIO = 0.90           # > context_limit * 0.9 触发滑动窗口
 RECENT_KEEP = 6                 # 摘要时保留最近 K 轮
-SUMMARY_MAX_CHARS = 500         # 摘要输出最大字符数
+SUMMARY_MAX_CHARS = 1500        # 摘要输出最大字符数
+TRANSCRIPT_TOOL_MAX_CHARS = 20000  # 轨迹里单条 tool / write content 上限
+KEEP_RECENT_TOKENS = 20000         # 窗口默认保留最近 token
 
 _SUMMARY_PROMPT = """请将以下对话历史压缩为一段简短摘要（不超过{max_chars}字），要求保留：
 1. 用户的原始目标/任务
@@ -243,6 +245,73 @@ def sliding_window(messages: list, recent_keep: int = RECENT_KEEP) -> tuple:
     return new_messages, removed
 
 
+def _unit_start(messages, end_idx):
+    """包含 end_idx 的完整单位起点：单条，或 assistant(tool_calls)+tools。"""
+    if messages[end_idx].get("role") != "tool":
+        return end_idx
+    i = end_idx
+    while i > 0 and messages[i].get("role") == "tool":
+        i -= 1
+    if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+        return i
+    return end_idx
+
+
+def _cheap_summary(old_slice):
+    bits = []
+    for m in old_slice:
+        role = m.get("role")
+        c = m.get("content")
+        if role == "user" and isinstance(c, str) and c.strip() and m.get("name") != "context_summary":
+            bits.append("用户: " + c.strip().replace("\n", " ")[:200])
+        elif role == "assistant" and m.get("tool_calls"):
+            names = []
+            for tc in m["tool_calls"]:
+                fn = (tc.get("function") or {})
+                names.append(fn.get("name") or "")
+            bits.append("工具: " + ", ".join(n for n in names if n))
+    text = "之前的进展：\n" + "\n".join(bits[:30])
+    if len(text) > SUMMARY_MAX_CHARS:
+        text = text[:SUMMARY_MAX_CHARS]
+    return text
+
+
+def window_from_transcript(transcript, system_content, keep_recent_tokens=None):
+    """
+    从完整轨迹派生 API 窗口。不修改 transcript。
+    超出 keep_recent_tokens 的旧段变成 name=context_summary 的 user 消息。
+    """
+    keep = KEEP_RECENT_TOKENS if keep_recent_tokens is None else keep_recent_tokens
+    system_msg = {"role": "system", "content": system_content}
+    if not transcript:
+        return [system_msg]
+
+    kept_from = len(transcript)
+    tokens = 0
+    i = len(transcript) - 1
+    while i >= 0:
+        start = _unit_start(transcript, i)
+        batch = transcript[start:i + 1]
+        t = _estimate_tokens(batch)
+        if kept_from < len(transcript) and tokens + t > keep:
+            break
+        tokens += t
+        kept_from = start
+        i = start - 1
+
+    dropped = transcript[:kept_from]
+    kept = [dict(m) for m in transcript[kept_from:]]
+    window = [system_msg]
+    if dropped:
+        window.append({
+            "role": "user",
+            "name": "context_summary",
+            "content": _cheap_summary(dropped),
+        })
+    window.extend(kept)
+    return window
+
+
 # ---------------------------------------------------------------------------
 # 总入口
 # ---------------------------------------------------------------------------
@@ -359,17 +428,12 @@ def _do_summarize(messages: list, llm_chat_fn, recent_keep: int) -> tuple:
     if first_user:
         new_messages.append(dict(first_user))
 
-    # 摘要作为一条 system 补充
     new_messages.append({
         "role": "user",
-        "content": f"[系统自动摘要 - 之前 {len(old_slice)} 条消息的概要]\n{summary}"
-    })
-    new_messages.append({
-        "role": "assistant",
-        "content": "好的，我了解之前的进展了。请继续。"
+        "name": "context_summary",
+        "content": summary,
     })
 
-    # 接上最近 K 轮
     new_messages.extend(recent)
 
     return new_messages, len(old_slice)

@@ -72,11 +72,11 @@ class Plan9SkillTests(unittest.TestCase):
     def _state(self):
         return commands.CliState(".", None, "deadbeef", [], 0, 0, 0, usage.Tracker("deadbeef"))
 
-    def test_tools_still_five(self):
+    def test_tools_are_seven(self):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
         )
         self.assertFalse(any(n.startswith("skill_") for n in names))
         self.assertNotIn("load_skill", names)

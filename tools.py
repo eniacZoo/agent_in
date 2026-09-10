@@ -3,7 +3,7 @@
 """
 tools.py — Agent 工具定义与执行
 
-5 个工具：read_file, write_file, edit_file, shell, view_image
+7 个工具：read_file, write_file, edit_file, shell, view_image, glob, grep
 零依赖，跨平台（Windows / Linux / macOS）
 """
 import os
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import locale
+import fnmatch
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,6 +33,18 @@ SAFE_MODE = False  # 由 agent 入口赋值（v6.0 陷阱 E）
 SHELL_TIMEOUT = 60  # 默认 shell 超时
 MAX_READ_LINES = 500  # read_file 最大行数
 MAX_OUTPUT_CHARS = 10_000  # shell 输出上限
+OFFICE_MAX_COLS = 80
+OFFICE_SUMMARY_MAX = 8000
+GLOB_MAX = 200
+GREP_PER_FILE = 20
+GREP_MAX = 100
+_SKIP_DIRS = frozenset({"vendor", ".git", "__pycache__", "node_modules"})
+_PY_SCRIPT = re.compile(
+    r'(?i)(?:python(?:w)?(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?'
+    r'["\']?(?:\s+-[^\s"\']+)*\s+["\']?([^\s"\']+\.py)'
+)
+_MAX_COL_RANGE = re.compile(r"range\s*\([^)]*max_column")
+_ITER_ROWS_BARE = re.compile(r"iter_rows\s*\(\s*\)")
 
 
 def ensure_temp_dir(work_dir=None):
@@ -50,7 +63,7 @@ BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the content of a file. Returns content with line numbers. Use start_line/end_line for partial reads of large files.",
+            "description": "Read a file. Text files return numbered lines. xlsx/docx/pptx/pdf return a bounded structure summary, not raw bytes.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -160,11 +173,57 @@ BASE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "List files under the working directory matching a glob pattern (e.g. *.xlsx, **/*.py). Does not leave the work dir.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (required)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search (default: working directory)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": "Search file contents under the working directory. pattern is a regex; invalid regex is treated as a literal.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex or literal to search for",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "File glob (default *.{py,md,txt,json,csv})",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search (default: working directory)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
 ]
 
 
 def _load_tools():
-    """构建 TOOLS 列表 = 固定 5 个基础工具（技能不注册为 function）。"""
+    """构建 TOOLS 列表 = 固定基础工具（技能不注册为 function）。"""
     return list(BASE_TOOLS)
 
 
@@ -268,6 +327,10 @@ def execute(tool_name, args, confirm_fn=None, input_fn=None, session_id=None):
             result = _exec_shell(args)
         elif tool_name == "view_image":
             result = _exec_view_image(args)
+        elif tool_name == "glob":
+            result = _exec_glob(args)
+        elif tool_name == "grep":
+            result = _exec_grep(args)
         elif tool_name.startswith("skill_"):
             skill_name = tool_name[len("skill_"):]
             result = skill_manager.execute_skill(
@@ -417,12 +480,153 @@ def _exec_view_image(args):
 # ---------------------------------------------------------------------------
 # read_file
 # ---------------------------------------------------------------------------
+def _ensure_vendor():
+    v = _vendor_dir()
+    if v not in sys.path:
+        sys.path.insert(0, v)
+
+
+def _col_letter(n):
+    s = ""
+    n = int(n)
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s or "A"
+
+
+def _xlsx_used_bounds(ws):
+    cells = getattr(ws, "_cells", None) or {}
+    max_r, max_c = 0, 0
+    for key in cells:
+        r, c = key[0], key[1]
+        if r > max_r:
+            max_r = r
+        if c > max_c:
+            max_c = c
+    return max_r, max_c
+
+
+def _summarize_xlsx(path):
+    _ensure_vendor()
+    try:
+        import openpyxl
+    except ImportError:
+        return "Error: openpyxl 不可用，无法读取 xlsx（请用 vendor，不要 pip）。"
+    try:
+        wb = openpyxl.load_workbook(str(path), data_only=False, read_only=False)
+    except Exception as e:
+        return f"Error: 无法打开 xlsx: {type(e).__name__}: {e}"
+    try:
+        lines = [f"xlsx: {path.name}", f"sheets: {', '.join(wb.sheetnames)}"]
+        for name in wb.sheetnames:
+            ws = wb[name]
+            used_r, used_c_raw = _xlsx_used_bounds(ws)
+            used_c = min(used_c_raw, OFFICE_MAX_COLS) if used_c_raw else 0
+            merges = list(ws.merged_cells.ranges) if getattr(ws, "merged_cells", None) else []
+            lines.append(
+                f"sheet '{name}': used_rows={used_r} used_cols={used_c}"
+                + (f" (occupied {used_c_raw}, capped {OFFICE_MAX_COLS})" if used_c_raw > OFFICE_MAX_COLS else "")
+                + f" merges={len(merges)}"
+            )
+            if merges:
+                lines.append("  merge ranges: " + ", ".join(str(x) for x in merges[:30]))
+            header_n = min(8, used_r) if used_r else 0
+            shown = 0
+            for r in range(1, header_n + 1):
+                cells = []
+                for c in range(1, (used_c or 0) + 1):
+                    val = ws.cell(r, c).value
+                    if val is None or val == "":
+                        continue
+                    cells.append(f"{_col_letter(c)}{r}={val}")
+                if cells:
+                    lines.append("  " + "; ".join(cells)[:400])
+                    shown += 1
+                if shown >= 15:
+                    break
+        lines.append("不要用 max_column 扫全表，本摘要列已封顶。")
+        text = "\n".join(lines)
+        if len(text) > OFFICE_SUMMARY_MAX:
+            text = text[:OFFICE_SUMMARY_MAX] + "\n…(truncated)"
+        return text
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+
+def _summarize_docx(path):
+    _ensure_vendor()
+    try:
+        from docx import Document
+        doc = Document(str(path))
+    except Exception as e:
+        return f"Error: 无法打开 docx: {type(e).__name__}: {e}"
+    paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()][:40]
+    text = f"docx: {path.name}\nparagraphs: {len(doc.paragraphs)}\n" + "\n".join(paras)
+    return text[:OFFICE_SUMMARY_MAX]
+
+
+def _summarize_pptx(path):
+    _ensure_vendor()
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(path))
+    except Exception as e:
+        return f"Error: 无法打开 pptx: {type(e).__name__}: {e}"
+    lines = [f"pptx: {path.name}", f"slides: {len(prs.slides)}"]
+    for i, slide in enumerate(prs.slides, 1):
+        bits = []
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False):
+                t = shape.text_frame.text.strip()
+                if t:
+                    bits.append(t.replace("\n", " ")[:120])
+            if len(bits) >= 3:
+                break
+        title = bits[0] if bits else "(empty)"
+        lines.append(f"  {i}. {title}")
+        if i >= 15:
+            break
+    return "\n".join(lines)[:OFFICE_SUMMARY_MAX]
+
+
+def _summarize_pdf(path):
+    _ensure_vendor()
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+    except Exception as e:
+        return f"Error: 无法打开 pdf: {type(e).__name__}: {e}"
+    n = len(reader.pages)
+    lines = [f"pdf: {path.name}", f"pages: {n}"]
+    for i, page in enumerate(reader.pages[:3], 1):
+        try:
+            t = (page.extract_text() or "").strip().replace("\n", " ")[:500]
+        except Exception:
+            t = ""
+        lines.append(f"  p{i}: {t or '(no text)'}")
+    return "\n".join(lines)[:OFFICE_SUMMARY_MAX]
+
+
 def _exec_read_file(args):
     path = _resolve_path(args["path"])
     if not path.exists():
         return f"Error: File not found: {path}"
     if not path.is_file():
         return f"Error: Not a file: {path}"
+
+    suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xlsm"):
+        return _summarize_xlsx(path)
+    if suffix == ".docx":
+        return _summarize_docx(path)
+    if suffix == ".pptx":
+        return _summarize_pptx(path)
+    if suffix == ".pdf":
+        return _summarize_pdf(path)
 
     try:
         content, _enc = _read_text(path)
@@ -437,14 +641,12 @@ def _exec_read_file(args):
     start = max(1, start)
     end = min(total, end)
 
-    # 截断保护
     if end - start + 1 > MAX_READ_LINES:
         end = start + MAX_READ_LINES - 1
         truncated = True
     else:
         truncated = False
 
-    # 带行号输出
     numbered = []
     for i in range(start, end + 1):
         numbered.append(f"{i:5d}: {lines[i - 1]}")
@@ -460,9 +662,23 @@ def _exec_read_file(args):
 # ---------------------------------------------------------------------------
 # write_file
 # ---------------------------------------------------------------------------
+_TRIM_LEAK = "需要时 read_file 重取"
+
+
+def _reject_trim_leak(*chunks):
+    for s in chunks:
+        if isinstance(s, str) and _TRIM_LEAK in s:
+            return ("Error: 内容含窗口裁剪占位（trimmed），不要写进文件。"
+                    "请重新生成完整内容。")
+    return None
+
+
 def _exec_write_file(args):
     path = _resolve_path(args["path"])
     content = args.get("content", "")
+    leaked = _reject_trim_leak(content)
+    if leaked:
+        return leaked
 
     # 出界/敏感判定已在 execute() 网关完成；此处只执行写入。
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,6 +695,9 @@ def _exec_edit_file(args):
     path = _resolve_path(args["path"])
     old_text = args.get("old_text", "")
     new_text = args.get("new_text", "")
+    leaked = _reject_trim_leak(old_text, new_text)
+    if leaked:
+        return leaked
 
     if not path.exists():
         return f"Error: File not found: {path}"
@@ -514,7 +733,39 @@ def _shell_env():
     old = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = vendor + os.pathsep + old if old else vendor
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     return env
+
+
+def _reject_max_column_script(command):
+    """跑 python 脚本前：含 max_column 全表循环则不启动。"""
+    m = _PY_SCRIPT.search(command or "")
+    if not m:
+        return None
+    script = m.group(1)
+    try:
+        p = _resolve_path(script)
+        src = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    bad = bool(_MAX_COL_RANGE.search(src))
+    if _ITER_ROWS_BARE.search(src) and "max_col" not in src:
+        bad = True
+    if not bad:
+        return None
+    return (
+        "Error: 列循环须有上界（≤80 或最后有内容的列），xlsx 结构用 read_file。"
+        " 已拒绝启动含 range(...max_column) 或无界 iter_rows() 的脚本。"
+    )
+
+
+def _powershell_ampersand_error(command):
+    shell = _detect_shell()[0].lower()
+    if "powershell" not in shell and shell != "pwsh":
+        return None
+    if "&&" not in (command or ""):
+        return None
+    return "Error: PowerShell 请用 `;` 分隔命令，不要用 `&&`。"
 
 
 def _exec_shell(args, confirm_fn=None):
@@ -524,6 +775,13 @@ def _exec_shell(args, confirm_fn=None):
 
     if not command:
         return "Error: Empty command"
+
+    amp = _powershell_ampersand_error(command)
+    if amp:
+        return amp
+    blocked = _reject_max_column_script(command)
+    if blocked:
+        return blocked
 
     shell_cmd = _detect_shell()
     full_cmd = shell_cmd + [command]
@@ -539,7 +797,10 @@ def _exec_shell(args, confirm_fn=None):
         )
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
-        return f"Error: Command timed out after {timeout}s: {command}"
+        return (
+            f"Error: Command timed out after {timeout}s: {command}\n"
+            "缩小扫描范围 / 用 read_file 看 xlsx。"
+        )
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
 
@@ -566,6 +827,107 @@ def _exec_shell(args, confirm_fn=None):
     result += f"\n[elapsed: {elapsed:.1f}s]"
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# glob / grep
+# ---------------------------------------------------------------------------
+def _within_workdir(path):
+    wd = Path(os.path.abspath(WORK_DIR)).resolve()
+    try:
+        Path(path).resolve().relative_to(wd)
+        return True
+    except ValueError:
+        return False
+
+
+def _expand_braces(pat):
+    m = re.match(r"^(.*)\{([^}]+)\}(.*)$", pat or "")
+    if not m:
+        return [pat]
+    return [m.group(1) + p.strip() + m.group(3) for p in m.group(2).split(",")]
+
+
+def _glob_match(rel, name, pattern):
+    rel = rel.replace("\\", "/")
+    for pat in _expand_braces(pattern):
+        pat = (pat or "").replace("\\", "/")
+        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat):
+            return True
+        if pat.startswith("**/"):
+            rest = pat[3:]
+            if fnmatch.fnmatch(name, rest) or fnmatch.fnmatch(rel, rest):
+                return True
+            if "/" in rel and fnmatch.fnmatch(rel.split("/")[-1], rest):
+                return True
+    return False
+
+
+def _iter_work_files(root):
+    root = Path(root)
+    wd = Path(os.path.abspath(WORK_DIR)).resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            try:
+                rel = str(p.resolve().relative_to(wd)).replace("\\", "/")
+            except ValueError:
+                continue
+            yield p, rel, fn
+
+
+def _exec_glob(args):
+    pattern = (args.get("pattern") or "").strip()
+    if not pattern:
+        return "Error: pattern required"
+    base = _resolve_path(args.get("path") or WORK_DIR)
+    if not _within_workdir(base):
+        return "Error: path outside working directory"
+    if not base.exists():
+        return f"Error: Not found: {base}"
+    hits = []
+    for _p, rel, name in _iter_work_files(base):
+        if _glob_match(rel, name, pattern):
+            hits.append(rel)
+        if len(hits) >= GLOB_MAX:
+            break
+    return "\n".join(hits) if hits else "(no matches)"
+
+
+def _exec_grep(args):
+    raw = args.get("pattern")
+    if raw is None or str(raw) == "":
+        return "Error: pattern required"
+    raw = str(raw)
+    try:
+        rx = re.compile(raw)
+    except re.error:
+        rx = re.compile(re.escape(raw))
+    gpat = args.get("glob") or "*.{py,md,txt,json,csv}"
+    base = _resolve_path(args.get("path") or WORK_DIR)
+    if not _within_workdir(base):
+        return "Error: path outside working directory"
+    lines = []
+    for p, rel, name in _iter_work_files(base):
+        if not _glob_match(rel, name, gpat):
+            continue
+        try:
+            if p.stat().st_size > 2_000_000:
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        nfile = 0
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                lines.append(f"{rel}:{i}:{line[:200]}")
+                nfile += 1
+                if nfile >= GREP_PER_FILE or len(lines) >= GREP_MAX:
+                    break
+        if len(lines) >= GREP_MAX:
+            break
+    return "\n".join(lines) if lines else "(no matches)"
 
 
 # ---------------------------------------------------------------------------

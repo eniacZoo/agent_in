@@ -122,8 +122,9 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
         interactive=False,
     )
 
-    if reply:
-        messages.append({"role": "assistant", "content": reply})
+    if reply and reply != "[已中止]":
+        print()
+    elif reply == "[已中止]":
         print()
     ui.turn_footer(
         {"prompt_tokens": pt, "completion_tokens": ct} if pt else None,
@@ -137,8 +138,6 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
 
     try:
         saved = [m for m in full_messages if m.get("role") != "system"]
-        if reply:
-            saved.append({"role": "assistant", "content": reply})
         session.save(sid, saved, meta={
             "provider": config.get("provider", "default"),
             "model": model or llm.MODEL,
@@ -265,29 +264,18 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
             prev_prompt=state.total_prompt, prev_completion=state.total_completion,
         )
 
+        state.messages = [m for m in full_messages if m.get("role") != "system"]
+
         if reply == "[已中止]":
-            state.messages.append({
-                "role": "assistant",
-                "content": "（上一轮被用户中止，未完成。已完成的操作见系统提示中的台账。）",
-            })
             print()
         elif reply:
-            state.messages.append({"role": "assistant", "content": reply})
             print()
 
         state.total_prompt += pt
         state.total_completion += ct
 
         try:
-            saved = [m for m in full_messages if m.get("role") != "system"]
-            if reply == "[已中止]":
-                saved.append({
-                    "role": "assistant",
-                    "content": "（上一轮被用户中止，未完成。已完成的操作见系统提示中的台账。）",
-                })
-            elif reply:
-                saved.append({"role": "assistant", "content": reply})
-            session.save(state.sid, saved, meta={
+            session.save(state.sid, state.messages, meta={
                 "provider": config.get("provider", "default"),
                 "model": model or llm.MODEL,
                 "work_dir": work_dir,

@@ -474,8 +474,8 @@ def assess_write(path, work_dir, safe_mode=False):
         # 3) 工作目录内 → 放行
         return _verdict("INFO", ACTION_ALLOW, [], "within work_dir", str(p))
     else:
-        # 4) 出界
-        sev = "CRITICAL" if safe_mode else "MEDIUM"
+        # 4) 出界：桌面报告等用户点名的路径走确认，SAFE_MODE 不再直接 BLOCK
+        sev = "MEDIUM"
         findings.append("outside_workdir")
 
     action = _action_for(sev, safe_mode)
@@ -485,8 +485,6 @@ def assess_write(path, work_dir, safe_mode=False):
         why_parts.append("敏感路径")
     if "outside_workdir" in findings:
         why_parts.append("工作目录外")
-    if safe_mode and "outside_workdir" in findings:
-        why_parts.append("SAFE_MODE 开启")
     reason = "，".join(why_parts) if why_parts else "unknown"
 
     return _verdict(sev, action, findings, reason, str(p))
@@ -537,5 +535,5 @@ def assess_call(name, args, work_dir, safe_mode=False):
         path = args.get("path", "") if isinstance(args, dict) else ""
         return assess_write(path, work_dir, safe_mode)
 
-    # skill_* / read_file / view_image → ALLOW（陷阱 F：skill 守卫在 skill_manager）
+    # skill_* / read_file / view_image / glob / grep → ALLOW
     return _verdict("INFO", ACTION_ALLOW, [], "no guard needed", "")

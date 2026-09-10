@@ -13,6 +13,7 @@ loop.py — Agent 核心循环（对应 PI 的 agent-core）
 """
 import json
 import os
+import re
 import sys
 import time
 import hashlib
@@ -45,23 +46,26 @@ TURN_LEDGER = []            # 本会话已完成的关键操作，跨回合保�
 LEDGER_MAX_LINES = 40
 LEDGER_LINE_MAX = 120
 DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本地机器上。
-可用工具：read_file、write_file、edit_file、shell、view_image。
+可用工具：read_file、write_file、edit_file、shell、view_image、glob、grep。
 
 规则：
 1. 简洁，直接执行，不要寒暄
 2. 先读后改：改文件前先 read_file
 3. 路径相对于工作目录：{work_dir}
-4. 当前 shell 是 {shell}。PowerShell 下多条命令用 `;` 分隔，不要用 `&&` 或 `&`，不要用 `cd /d`，用 `Set-Location`。Windows 列目录用 Get-ChildItem。不要用 shell 做删除，除非用户明确要求。临时文件只写 {work_dir}/temp/，该目录可删。长任务摘要写入 {work_dir}/temp/task_notes.md
+4. 当前 shell 是 {shell}。PowerShell 下多条命令用 `;` 分隔，不要用 `&&` 或 `&`，不要用 `cd /d`，用 `Set-Location`。Windows 列目录用 Get-ChildItem。不要用 shell 做删除，除非用户明确要求。草稿只写 {work_dir}/temp/（可删）。用户要的 html/xlsx/docx/pptx/pdf 写到指定路径（可在工作目录外，会先确认），写完就停。长任务摘要写入 {work_dir}/temp/task_notes.md
 5. 用户提到图片时先 view_image
 6. 完成后用 1-2 句话总结
 7. 办公文件先 read_file 对应流程（不要一次读完全部）：skills/xlsx.md、skills/docx.md、skills/pptx.md、skills/pdf.md；网页 skills/网页.md。周报见 skills/周报转docx.md（先读 docx.md）。包在 vendor/，shell 已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。探结构只把摘要写入 temp/，写一份脚本再跑，报错改脚本，不要把整表整文打进对话。"""
 
 _OFFICE_DISCIPLINE = """
 ## 办公任务纪律
-思考保持简短。先读对应 skill；列映射一旦清楚立刻写**一份**脚本，不要一路 `python -c`。
-探查最多 2 次，摘要写 temp/，不要把整表打进对话。
+思考保持简短。先读对应 skill；列映射一旦清楚立刻写脚本，不要一路 `python -c`。
+探查摘要写 temp/，不要把整表打进对话。表里已有的排名列直接用，不要为公式空转。
+xlsx 用 read_file 看结构，不要按 max_column 扫全表。
 产物写到用户指定路径且校验通过后**立即停止**：不要再截图、不要再 dump、不要重复校验同一结论。
 """
+
+ABORT_NOTE = "（上一轮被用户中止，未完成。已完成的操作见系统提示中的台账。）"
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +112,147 @@ def _tool_sig(name, args):
     return (name, hashlib.sha1(raw).hexdigest()[:12])
 
 
+def _is_tool_ok(result):
+    """成功结果才算 ok。阻断文案是「操作被拒绝…」，不能当产出。"""
+    s = (result or "").lstrip()
+    return not (s.startswith("Error") or s.startswith("操作被拒绝"))
+
+
+def _resolved_tool_path(path, work_dir=None):
+    wd = os.path.abspath(work_dir or tools.WORK_DIR)
+    raw = str(path or "")
+    if not raw:
+        return wd, None
+    rp = os.path.abspath(raw if os.path.isabs(raw) else os.path.join(wd, raw))
+    return wd, rp
+
+
+def _is_temp_path(path, work_dir=None):
+    """草稿：{work_dir}/temp/ 下。"""
+    wd, rp = _resolved_tool_path(path, work_dir)
+    if rp is None:
+        return False
+    temp = os.path.abspath(os.path.join(wd, "temp"))
+    try:
+        return os.path.commonpath([temp, rp]) == temp
+    except ValueError:
+        return False
+
+
+def _is_product_write(path, work_dir=None):
+    """用户侧产物：不是 temp/ 草稿。工作目录内正式文件、桌面等出界路径都算。"""
+    if not str(path or ""):
+        return False
+    return not _is_temp_path(path, work_dir)
+
+
+def _shell_mutates_temp(command, work_dir=None):
+    """shell 在跑/写 work_dir/temp 下的脚本。"""
+    cmd = command or ""
+    if not re.search(r'(?i)temp[/\\].+\.(py|ps1)\b', cmd):
+        return False
+    wd = os.path.abspath(work_dir or tools.WORK_DIR)
+    temp = os.path.abspath(os.path.join(wd, "temp"))
+    return ("temp" in cmd.replace("/", "\\").lower()) or (temp.lower() in cmd.lower())
+
+
+_PRODUCT_FILE = re.compile(
+    r'(?i)["\']([^"\']+\.(?:html?|xlsx|xlsm|docx|pptx|pdf|csv))["\']'
+    r'|([A-Za-z]:\\[^\s"\']+\.(?:html?|xlsx|xlsm|docx|pptx|pdf|csv))'
+)
+_PRODUCT_MTIME_SEC = 180
+
+
+def _product_paths_in_text(text):
+    out = []
+    for m in _PRODUCT_FILE.finditer(text or ""):
+        p = m.group(1) or m.group(2)
+        if p:
+            out.append(p)
+    return out
+
+
+def _shell_wrote_product(command, result, work_dir=None):
+    """脚本写出 html/xlsx 等（路径在命令、输出或源码里），且文件是刚写的。"""
+    blobs = [command or "", result or ""]
+    m = tools._PY_SCRIPT.search(command or "")
+    if m:
+        _, script = _resolved_tool_path(m.group(1), work_dir)
+        if script:
+            try:
+                blobs.append(open(script, encoding="utf-8", errors="replace").read(80000))
+            except OSError:
+                pass
+    now = time.time()
+    seen = set()
+    for blob in blobs:
+        for path in _product_paths_in_text(blob):
+            if not _is_product_write(path, work_dir):
+                continue
+            _, rp = _resolved_tool_path(path, work_dir)
+            if not rp or rp in seen:
+                continue
+            seen.add(rp)
+            try:
+                if os.path.isfile(rp) and now - os.path.getmtime(rp) <= _PRODUCT_MTIME_SEC:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def should_stall_stop(mutated, rounds_since_write):
+    """已开始改用户侧文件，且连续 12 轮没有产物 → 停。草稿不停这条。"""
+    return bool(mutated) and rounds_since_write >= 12
+
+
+def _for_save(transcript):
+    """存盘轨迹：去掉窗口摘要，不含 system。"""
+    out = []
+    for m in transcript:
+        if m.get("role") == "system":
+            continue
+        if m.get("name") == "context_summary":
+            continue
+        out.append(m)
+    return out
+
+
+def _cap_transcript_msg(msg):
+    """单条 tool / write_file 参数存盘上限。"""
+    m = dict(msg)
+    cap = context.TRANSCRIPT_TOOL_MAX_CHARS
+    content = m.get("content")
+    if m.get("role") == "tool" and isinstance(content, str) and len(content) > cap:
+        m["content"] = content[:cap] + f"\n…(truncated {len(content) - cap} chars)"
+        return m
+    if m.get("role") == "assistant" and m.get("tool_calls"):
+        tcs = []
+        changed = False
+        for tc in m["tool_calls"]:
+            fn = dict(tc.get("function") or {})
+            raw = fn.get("arguments") or ""
+            try:
+                args = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                tcs.append(tc)
+                continue
+            if isinstance(args, dict) and isinstance(args.get("content"), str) and len(args["content"]) > cap:
+                n = len(args["content"])
+                args["content"] = args["content"][:cap] + f"…(truncated {n - cap} chars, path={args.get('path', '')})"
+                new_tc = dict(tc)
+                new_fn = dict(fn)
+                new_fn["arguments"] = json.dumps(args, ensure_ascii=False)
+                new_tc["function"] = new_fn
+                tcs.append(new_tc)
+                changed = True
+            else:
+                tcs.append(tc)
+        if changed:
+            m["tool_calls"] = tcs
+    return m
+
+
 # ---------------------------------------------------------------------------
 # 上下文监控
 # ---------------------------------------------------------------------------
@@ -150,6 +295,8 @@ _TOOL_CALL_DEGRADE_HINT = (
     "TOOL: write_file {\"path\": \"...\", \"content\": \"...\"}\n"
     "TOOL: edit_file {\"path\": \"...\", \"old\": \"...\", \"new\": \"...\"}\n"
     "TOOL: shell {\"command\": \"...\"}\n"
+    "TOOL: glob {\"pattern\": \"*.xlsx\"}\n"
+    "TOOL: grep {\"pattern\": \"openpyxl\"}\n"
     "完成所有工具后直接输出最终回答。"
 )
 
@@ -210,7 +357,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         interactive: False 时需确认的操作直接拒绝
     返回：
         (最终回复文本, prompt tokens, completion tokens, 耗时秒, full_messages)
-        full_messages 含 system。Ctrl-C 中止时文本为「[已中止]」。
+        full_messages = [system] + transcript（未裁剪）。Ctrl-C 中止时文本为「[已中止]」。
     """
     global LAST_PROMPT_TOKENS, LAST_PEAK_PROMPT
     LAST_PEAK_PROMPT = 0
@@ -226,7 +373,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         system_prompt += "\n\n## 长期记忆（跨会话）\n" + memory_content
         logger.info("memory_loaded", {"chars": mem_chars})
 
-    full_messages = [{"role": "system", "content": system_prompt}] + messages
+    transcript = list(messages)
+    system_msg = {"role": "system", "content": system_prompt}
 
     total_prompt = 0
     total_completion = 0
@@ -238,16 +386,48 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
     _writes_this_turn = 0
     seen_calls = {}
     rounds_since_write = 0
+    _mutated = False
+    scratch_rounds = 0
+    _scratching = False
 
     if debug.ENABLED and messages:
         last = messages[-1]
         if last.get("role") == "user":
             debug.emit("USER", {"content": (last.get("content") or "")[:2000]})
 
+    def _packed():
+        return [system_msg] + transcript
+
     def _done(text):
         global LAST_TOOL_ROUNDS
         LAST_TOOL_ROUNDS = tool_iterations
-        return text, total_prompt, total_completion, total_elapsed, full_messages
+        return text, total_prompt, total_completion, total_elapsed, _packed()
+
+    def _save_mid():
+        if not session_id:
+            return
+        try:
+            t = tracker.session_total() if tracker else {"prompt": 0, "completion": 0}
+            session.save(session_id, _for_save(transcript), meta={
+                "model": llm.MODEL,
+                "work_dir": work_dir,
+                "total_prompt": prev_prompt + t.get("prompt", 0),
+                "total_completion": prev_completion + t.get("completion", 0),
+            })
+        except Exception:
+            pass
+
+    def _mark_abort():
+        if not transcript or transcript[-1].get("content") != ABORT_NOTE:
+            transcript.append({"role": "assistant", "content": ABORT_NOTE})
+
+    def _fill_remaining_tools(start_idx, result_text):
+        for rest in tool_calls[start_idx:]:
+            transcript.append(_cap_transcript_msg({
+                "role": "tool",
+                "tool_call_id": rest["id"],
+                "content": result_text,
+            }))
 
     while tool_iterations < MAX_TOOL_ITERATIONS:
         t0 = time.time()
@@ -271,9 +451,14 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         tool_calls = []
         reasoning_parts = []
 
+        window = context.window_from_transcript(
+            transcript, system_prompt,
+            keep_recent_tokens=config.get("keep_recent_tokens", 20000),
+        )
+        ctx_action = "none"
         if tool_iterations > 0 and LAST_PROMPT_TOKENS > 0:
-            full_messages, ctx_action = context.apply(
-                full_messages, LAST_PROMPT_TOKENS, CONTEXT_LIMIT,
+            window, ctx_action = context.apply(
+                window, LAST_PROMPT_TOKENS, CONTEXT_LIMIT,
                 llm_chat_fn=llm.chat,
                 auto_summarize=config.get("auto_summarize", True),
                 budget=config.get("compact_at_tokens", 40000),
@@ -288,7 +473,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     print(f"    {_c(f'{ui.ICO_FILE} 上下文管理: {ctx_action}', _C_GRAY)}")
 
         try:
-            for chunk in llm.chat(full_messages, tools=tools.TOOLS, images=pending_imgs or None):
+            for chunk in llm.chat(window, tools=tools.TOOLS, images=pending_imgs or None):
                 ctype = chunk["type"]
 
                 if ctype in ("reasoning", "text"):
@@ -320,6 +505,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                 print()
                 print(f"    {_c('[已中止本轮，会话保留]', _C_YELLOW)}")
             logger.warn("turn_aborted", {"session_id": session_id, "phase": "llm"})
+            _mark_abort()
             return _done("[已中止]")
 
         disp.finish()
@@ -334,6 +520,10 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
 
         if not tool_calls:
             final_text = current_text
+            asst = {"role": "assistant", "content": current_text}
+            if reasoning_parts:
+                asst["reasoning_content"] = "".join(reasoning_parts)
+            transcript.append(asst)
             break
 
         tool_iterations += 1
@@ -353,9 +543,10 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
             }
             for tc in tool_calls
         ]
-        full_messages.append(assistant_msg)
+        transcript.append(_cap_transcript_msg(assistant_msg))
 
-        for tc in tool_calls:
+        aborted = False
+        for ti, tc in enumerate(tool_calls):
             tool_name = tc["name"]
             tool_args = tc["arguments"]
             _sig = _tool_sig(tool_name, tool_args)
@@ -414,7 +605,15 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     print()
                     print(f"    {_c('[已中止本轮，会话保留]', _C_YELLOW)}")
                 logger.warn("turn_aborted", {"session_id": session_id, "tool": tool_name})
-                return _done("[已中止]")
+                transcript.append(_cap_transcript_msg({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": "Error: 用户中止",
+                }))
+                _fill_remaining_tools(ti + 1, "Error: 用户中止")
+                _mark_abort()
+                aborted = True
+                break
 
             if verbose:
                 ui.print_tool_status(tool_name, tool_args, tools.LAST_VERDICT, result)
@@ -426,46 +625,56 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     except Exception:
                         pass
 
-            ok = not (result or "").lstrip().startswith("Error")
-            if ok:
-                if tool_name in ("write_file", "edit_file"):
-                    ledger_add(f"{tool_name} {tool_args.get('path', '')}")
+            if tool_name in ("write_file", "edit_file"):
+                _path = tool_args.get("path", "")
+                ledger_add(f"{tool_name} {_path}")
+                if _is_temp_path(_path, work_dir):
+                    _scratching = True
+                else:
+                    _mutated = True
+                if _is_tool_ok(result) and _is_product_write(_path, work_dir):
                     _writes_this_turn += 1
-                elif tool_name == "shell":
-                    ledger_add(f"shell {str(tool_args.get('command', ''))[:80]} -> ok")
+            elif tool_name == "shell":
+                cmd = str(tool_args.get("command", ""))
+                if _shell_mutates_temp(cmd, work_dir):
+                    _scratching = True
+                if _is_tool_ok(result):
+                    ledger_add(f"shell {cmd[:80]} -> ok")
+                    if _shell_wrote_product(cmd, result, work_dir):
+                        _writes_this_turn += 1
 
-            full_messages.append({
+            transcript.append(_cap_transcript_msg({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
-            })
+            }))
 
-        if _writes_this_turn_before == _writes_this_turn:
-            rounds_since_write += 1
-        else:
+        if aborted:
+            return _done("[已中止]")
+
+        if _writes_this_turn > _writes_this_turn_before:
             rounds_since_write = 0
-        if rounds_since_write == 5 and verbose:
-            ui.print_warning(f"已连续 {rounds_since_write} 轮无文件产出，可能在原地打转")
-        if rounds_since_write >= 12:
-            final_text = ("[停止] 连续 12 轮无文件产出，已停止。"
-                          + ledger_block())
-            ui.print_warning("连续 12 轮无产出，已停止本轮")
-            break
+            scratch_rounds = 0
+        elif _mutated:
+            rounds_since_write += 1
+            if rounds_since_write == 5 and verbose:
+                ui.print_warning("已开始改文件但还没有用户侧产物，可能在原地打转")
+            if should_stall_stop(_mutated, rounds_since_write):
+                final_text = ("[停止] 连续 12 轮无文件产出，已停止。"
+                              + ledger_block())
+                ui.print_warning("连续 12 轮无产出，已停止本轮")
+                transcript.append({"role": "assistant", "content": final_text})
+                break
+        elif _scratching:
+            scratch_rounds += 1
+            if scratch_rounds in (20, 40) and verbose:
+                ui.print_warning("还在 temp/ 里打转，记得写出用户要的文件")
 
-        if session_id:
-            try:
-                t = tracker.session_total() if tracker else {"prompt": 0, "completion": 0}
-                session.save(session_id, [m for m in full_messages if m.get("role") != "system"], meta={
-                    "model": llm.MODEL,
-                    "work_dir": work_dir,
-                    "total_prompt": prev_prompt + t.get("prompt", 0),
-                    "total_completion": prev_completion + t.get("completion", 0),
-                })
-            except Exception:
-                pass
+        _save_mid()
 
     if tool_iterations >= MAX_TOOL_ITERATIONS:
         final_text = f"[警告] 达到最大工具调用轮数 ({MAX_TOOL_ITERATIONS})，任务可能未完成。"
         ui.print_warning(final_text)
+        transcript.append({"role": "assistant", "content": final_text})
 
     return _done(final_text)

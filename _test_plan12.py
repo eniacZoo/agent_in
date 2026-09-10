@@ -72,11 +72,11 @@ class Plan12Tests(unittest.TestCase):
         self.assertIn("xlsx.md", loop.DEFAULT_SYSTEM_PROMPT)
         self.assertIn("禁止 pip", loop.DEFAULT_SYSTEM_PROMPT)
 
-    def test_tools_still_five(self):
+    def test_tools_are_seven(self):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
         )
 
 

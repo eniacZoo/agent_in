@@ -494,6 +494,9 @@ class StreamDisplay:
         elif name == "view_image":
             p = args.get("path", "?")
             return f" {p}"
+        elif name in ("glob", "grep"):
+            p = args.get("pattern", "?")
+            return f" {p}"
         else:
             import json as _json
             s = _json.dumps(args, ensure_ascii=False)

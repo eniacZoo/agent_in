@@ -113,43 +113,54 @@ def load(session_id: str) -> dict | None:
     return {"messages": messages, "meta": meta}
 
 
+def _tool_batch_end(messages: list, asst_idx: int):
+    """assistant(tool_calls) 起，若后续 tool 结果配齐则返回最后一条 tool 的下标，否则 None。"""
+    calls = messages[asst_idx].get("tool_calls") or []
+    ids = [c.get("id") for c in calls if isinstance(c, dict)]
+    if not ids:
+        return asst_idx
+    found = set()
+    j = asst_idx + 1
+    while j < len(messages) and messages[j].get("role") == "tool":
+        found.add(messages[j].get("tool_call_id"))
+        j += 1
+    if all(i in found for i in ids):
+        return j - 1
+    return None
+
+
 def _validate_messages(messages: list) -> list:
     """
     校验 messages 中 tool_call / tool 配对完整性。
-    残缺则截断到最后一个完整 assistant 边界。
+    完整的 assistant(tool_calls)+tool 批次视为合法末尾；
+    仅残缺时截到上一个完整边界。
     """
     if not messages:
         return messages
 
-    # 找最后一个"安全"边界：
-    # 安全边界 = assistant 消息且没有 tool_calls，
-    #            或者 user 消息
-    # 从末尾往前找
-    for i in range(len(messages) - 1, -1, -1):
+    i = 0
+    last_good = 0
+    n = len(messages)
+    while i < n:
         m = messages[i]
         role = m.get("role", "")
         if role == "user":
-            return messages[: i + 1]
-        elif role == "assistant" and not m.get("tool_calls"):
-            return messages[: i + 1]
-        elif role == "tool":
-            # tool 消息前面应该有对应的 assistant tool_call
-            # 简化：如果有 tool 消息但前面没有对应 tool_call，截断
-            has_call = False
-            for j in range(i - 1, -1, -1):
-                if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
-                    calls = messages[j]["tool_calls"]
-                    call_ids = {c.get("id") for c in calls if isinstance(c, dict)}
-                    if m.get("tool_call_id") in call_ids:
-                        has_call = True
-                        break
-                elif messages[j].get("role") == "user":
-                    break
-            if not has_call:
-                return messages[:i]
-
-    # 如果整个 messages 都不安全（极端情况），保留空
-    return []
+            last_good = i + 1
+            i += 1
+            continue
+        if role == "assistant" and not m.get("tool_calls"):
+            last_good = i + 1
+            i += 1
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            end = _tool_batch_end(messages, i)
+            if end is None:
+                return messages[:last_good]
+            last_good = end + 1
+            i = end + 1
+            continue
+        return messages[:last_good]
+    return messages[:last_good]
 
 
 def list_sessions(limit: int = 20) -> list:

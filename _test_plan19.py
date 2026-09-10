@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""plan19.0：组合式 prompt + 五件套 md；工具表仍是 5 个。"""
+"""plan19.0：组合式 prompt + 五件套 md；工具表 7 个（plan21 加 glob/grep）。"""
 import os
 import sys
 import unittest
@@ -37,11 +37,11 @@ class Plan19Tests(unittest.TestCase):
         self.assertIn("思考保持简短", loop._OFFICE_DISCIPLINE)
         self.assertIn("立即停止", loop._OFFICE_DISCIPLINE)
 
-    def test_tools_still_five(self):
+    def test_tools_are_seven(self):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
         )
 
 

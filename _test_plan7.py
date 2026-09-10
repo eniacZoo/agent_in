@@ -18,11 +18,11 @@ class Plan7GuardTests(unittest.TestCase):
         cfg = config.load(force_reload=True)
         self.assertTrue(cfg.get("safe_mode"))
 
-    def test_tools_fixed_five(self):
+    def test_tools_fixed_seven(self):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
         )
         self.assertFalse(any(n.startswith("skill_") for n in names))
 
@@ -57,18 +57,27 @@ class Plan7GuardTests(unittest.TestCase):
         with open(newp, encoding="utf-8") as f:
             self.assertEqual(f.read(), "a")
 
-    def test_outside_write_blocked(self):
+    def test_outside_write_confirms(self):
         wd = tempfile.mkdtemp(prefix="agent_in_wd_")
         tools.WORK_DIR = wd
         tools.SAFE_MODE = True
         outside = os.path.join(os.path.dirname(wd), "agent_in_outside_plan7.txt")
-        r = tools.execute(
-            "write_file", {"path": outside, "content": "x"},
-            confirm_fn=lambda _p: True,
-        )
-        self.assertIn("拒绝", r)
-        self.assertNotIn("Created.", r)
-        self.assertFalse(os.path.exists(outside))
+        try:
+            r = tools.execute(
+                "write_file", {"path": outside, "content": "x"},
+                confirm_fn=lambda _p: False,
+            )
+            self.assertIn("拒绝", r)
+            self.assertFalse(os.path.exists(outside))
+            r2 = tools.execute(
+                "write_file", {"path": outside, "content": "x"},
+                confirm_fn=lambda _p: True,
+            )
+            self.assertTrue(r2.startswith("OK:"), r2)
+            self.assertTrue(os.path.isfile(outside))
+        finally:
+            if os.path.exists(outside):
+                os.remove(outside)
 
     def test_multi_replace_confirm(self):
         wd = tempfile.mkdtemp(prefix="agent_in_wd_")
