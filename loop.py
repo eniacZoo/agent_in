@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+import hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,6 +28,7 @@ import logger
 import config
 import context
 import session
+import debug
 
 
 # ---------------------------------------------------------------------------
@@ -34,10 +36,14 @@ import session
 # ---------------------------------------------------------------------------
 SHOW_REASONING = os.environ.get("SHOW_REASONING", "1") in ("1", "true", "yes")
 STREAM_CODE = ui.STREAM_CODE
-MAX_TOOL_ITERATIONS = 20
+MAX_TOOL_ITERATIONS = 80
 CONTEXT_LIMIT = 196_000
 LAST_TOOL_ROUNDS = 0       # 最近一次 agent_loop 的工具轮次（/status）
 LAST_PROMPT_TOKENS = 0     # 最近一次 LLM 请求的 prompt tokens（上下文占用）
+LAST_PEAK_PROMPT = 0       # 本回合单次 prompt 峰值
+TURN_LEDGER = []            # 本会话已完成的关键操作，跨回合保留
+LEDGER_MAX_LINES = 40
+LEDGER_LINE_MAX = 120
 DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本地机器上。
 可用工具：read_file、write_file、edit_file、shell、view_image。
 
@@ -45,10 +51,17 @@ DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本�
 1. 简洁，直接执行，不要寒暄
 2. 先读后改：改文件前先 read_file
 3. 路径相对于工作目录：{work_dir}
-4. Windows 用 dir / Get-ChildItem；不要用 shell 做删除，除非用户明确要求。临时文件只写 {work_dir}/temp/，该目录可删
+4. 当前 shell 是 {shell}。PowerShell 下多条命令用 `;` 分隔，不要用 `&&` 或 `&`，不要用 `cd /d`，用 `Set-Location`。Windows 列目录用 Get-ChildItem。不要用 shell 做删除，除非用户明确要求。临时文件只写 {work_dir}/temp/，该目录可删。长任务摘要写入 {work_dir}/temp/task_notes.md
 5. 用户提到图片时先 view_image
 6. 完成后用 1-2 句话总结
-7. 读 pptx/xlsx/docx/pdf 先 read_file skills/读pptx.md（或读xlsx.md / 读docx.md / 读pdf.md）。读网页先 skills/读网页.md。包在 vendor/，shell 已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。周报见 skills/周报转docx.md"""
+7. 办公文件先 read_file 对应流程（不要一次读完全部）：skills/xlsx.md、skills/docx.md、skills/pptx.md、skills/pdf.md；网页 skills/网页.md。周报见 skills/周报转docx.md（先读 docx.md）。包在 vendor/，shell 已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。探结构只把摘要写入 temp/，写一份脚本再跑，报错改脚本，不要把整表整文打进对话。"""
+
+_OFFICE_DISCIPLINE = """
+## 办公任务纪律
+思考保持简短。先读对应 skill；列映射一旦清楚立刻写**一份**脚本，不要一路 `python -c`。
+探查最多 2 次，摘要写 temp/，不要把整表打进对话。
+产物写到用户指定路径且校验通过后**立即停止**：不要再截图、不要再 dump、不要重复校验同一结论。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +76,36 @@ _C_RED = ui.C_RED
 
 def _c(text, color):
     return f"{color}{text}{ui.C_RESET}"
+
+
+def ledger_add(line):
+    """记一条已完成操作。去重 + 截断 + 限长。"""
+    line = (line or "").strip().replace("\n", " ")[:LEDGER_LINE_MAX]
+    if not line or line in TURN_LEDGER:
+        return
+    TURN_LEDGER.append(line)
+    if len(TURN_LEDGER) > LEDGER_MAX_LINES:
+        del TURN_LEDGER[0:len(TURN_LEDGER) - LEDGER_MAX_LINES]
+
+
+def ledger_clear():
+    """/new 时清空。"""
+    TURN_LEDGER.clear()
+
+
+def ledger_block():
+    """拼成 system prompt 片段；空台账返回空串。"""
+    if not TURN_LEDGER:
+        return ""
+    lines = "\n".join(f"- {x}" for x in TURN_LEDGER)
+    return ("\n\n## 本会话已完成的操作（这些已经做过，不要重复做，也不要重复校验）\n"
+            + lines)
+
+
+def _tool_sig(name, args):
+    """(tool_name, args_hash[:12])，用于重复调用检测。"""
+    raw = json.dumps(args, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return (name, hashlib.sha1(raw).hexdigest()[:12])
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +212,14 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         (最终回复文本, prompt tokens, completion tokens, 耗时秒, full_messages)
         full_messages 含 system。Ctrl-C 中止时文本为「[已中止]」。
     """
-    global LAST_PROMPT_TOKENS
-    system_prompt = os.environ.get("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT.format(work_dir=work_dir))
+    global LAST_PROMPT_TOKENS, LAST_PEAK_PROMPT
+    LAST_PEAK_PROMPT = 0
+    system_prompt = os.environ.get(
+        "SYSTEM_PROMPT",
+        DEFAULT_SYSTEM_PROMPT.format(work_dir=work_dir, shell=tools.shell_name()),
+    )
+    system_prompt += _OFFICE_DISCIPLINE
+    system_prompt += ledger_block()
 
     memory_content, mem_chars = memory_manager.load()
     if memory_content.strip() and memory_content.strip() != "# Agent Memory":
@@ -186,13 +235,21 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
     final_text = ""
     confirm_fn = ui.confirm if interactive else (lambda _p: False)
     input_fn = ui.text_input if interactive else None
+    _writes_this_turn = 0
+    seen_calls = {}
+    rounds_since_write = 0
+
+    if debug.ENABLED and messages:
+        last = messages[-1]
+        if last.get("role") == "user":
+            debug.emit("USER", {"content": (last.get("content") or "")[:2000]})
 
     def _done(text):
         global LAST_TOOL_ROUNDS
         LAST_TOOL_ROUNDS = tool_iterations
         return text, total_prompt, total_completion, total_elapsed, full_messages
 
-    while tool_iterations <= MAX_TOOL_ITERATIONS:
+    while tool_iterations < MAX_TOOL_ITERATIONS:
         t0 = time.time()
 
         pending_imgs = []
@@ -202,20 +259,31 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         pending_imgs.extend(tools.drain_pending_images())
 
         if verbose and tool_iterations > 0:
-            ui.turn_sep(f"tool round {tool_iterations}")
+            ui.turn_sep(
+                f"round {tool_iterations}/{MAX_TOOL_ITERATIONS}"
+                f" | last {ui.fmt_tokens(LAST_PROMPT_TOKENS)}"
+                f" | cum {ui.fmt_tokens(total_prompt)}"
+                f" | 产出 {_writes_this_turn}"
+            )
 
         disp = ui.StreamDisplay(show_reasoning=SHOW_REASONING)
         text_parts = []
         tool_calls = []
+        reasoning_parts = []
 
-        if tool_iterations > 0 and total_prompt > 0:
+        if tool_iterations > 0 and LAST_PROMPT_TOKENS > 0:
             full_messages, ctx_action = context.apply(
-                full_messages, total_prompt, CONTEXT_LIMIT,
+                full_messages, LAST_PROMPT_TOKENS, CONTEXT_LIMIT,
                 llm_chat_fn=llm.chat,
                 auto_summarize=config.get("auto_summarize", True),
+                budget=config.get("compact_at_tokens", 40000),
             )
             if ctx_action != "none":
-                logger.info("context_manage", {"action": ctx_action, "used_tokens": total_prompt})
+                logger.info("context_manage", {
+                    "action": ctx_action,
+                    "last_prompt": LAST_PROMPT_TOKENS,
+                    "cumulative": total_prompt,
+                })
                 if verbose:
                     print(f"    {_c(f'{ui.ICO_FILE} 上下文管理: {ctx_action}', _C_GRAY)}")
 
@@ -227,6 +295,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     disp.handle(chunk)
                     if ctype == "text":
                         text_parts.append(chunk["content"])
+                    elif ctype == "reasoning":
+                        reasoning_parts.append(chunk.get("content") or "")
                 elif ctype == "tool_call":
                     tool_calls.append(chunk)
                     disp.handle(chunk)
@@ -237,6 +307,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     if tracker:
                         tracker.add(llm.MODEL, u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
                     LAST_PROMPT_TOKENS = u.get("prompt_tokens", 0)
+                    LAST_PEAK_PROMPT = max(LAST_PEAK_PROMPT, LAST_PROMPT_TOKENS)
                     _check_context(LAST_PROMPT_TOKENS)
                 elif ctype == "error":
                     disp.handle(chunk)
@@ -255,14 +326,22 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         elapsed = time.time() - t0
         total_elapsed += elapsed
         current_text = "".join(text_parts).strip()
+        if debug.ENABLED:
+            if reasoning_parts:
+                debug.emit("THINK", {"content": "".join(reasoning_parts)[:4000]})
+            if current_text:
+                debug.emit("AI", {"content": current_text[:2000]})
 
         if not tool_calls:
             final_text = current_text
             break
 
         tool_iterations += 1
+        _writes_this_turn_before = _writes_this_turn
 
         assistant_msg = {"role": "assistant", "content": current_text or None}
+        if reasoning_parts:
+            assistant_msg["reasoning_content"] = "".join(reasoning_parts)
         assistant_msg["tool_calls"] = [
             {
                 "id": tc["id"],
@@ -279,6 +358,27 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         for tc in tool_calls:
             tool_name = tc["name"]
             tool_args = tc["arguments"]
+            _sig = _tool_sig(tool_name, tool_args)
+            seen_calls[_sig] = seen_calls.get(_sig, 0) + 1
+            logger.info("tool_call_sig", {
+                "name": tool_name,
+                "args_hash": _sig[1],
+                "count": seen_calls[_sig],
+            })
+            if seen_calls[_sig] >= 2:
+                logger.warn("tool_repeat", {
+                    "name": tool_name,
+                    "args_hash": _sig[1],
+                    "count": seen_calls[_sig],
+                })
+                if verbose:
+                    ui.print_warning(f"重复调用 {tool_name}（第 {seen_calls[_sig]} 次，参数相同）")
+            if debug.ENABLED:
+                debug.emit("TOOL_CALL", {"name": tool_name, "args": str(tool_args)[:400]})
+                if tool_name == "read_file":
+                    sp = str(tool_args.get("path") or "")
+                    if debug.is_skill_path(sp):
+                        debug.emit("SKILL_LOAD", {"name": os.path.splitext(os.path.basename(sp))[0], "path": sp})
 
             if verbose and STREAM_CODE:
                 if tool_name == "write_file":
@@ -326,11 +426,31 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     except Exception:
                         pass
 
+            ok = not (result or "").lstrip().startswith("Error")
+            if ok:
+                if tool_name in ("write_file", "edit_file"):
+                    ledger_add(f"{tool_name} {tool_args.get('path', '')}")
+                    _writes_this_turn += 1
+                elif tool_name == "shell":
+                    ledger_add(f"shell {str(tool_args.get('command', ''))[:80]} -> ok")
+
             full_messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
             })
+
+        if _writes_this_turn_before == _writes_this_turn:
+            rounds_since_write += 1
+        else:
+            rounds_since_write = 0
+        if rounds_since_write == 5 and verbose:
+            ui.print_warning(f"已连续 {rounds_since_write} 轮无文件产出，可能在原地打转")
+        if rounds_since_write >= 12:
+            final_text = ("[停止] 连续 12 轮无文件产出，已停止。"
+                          + ledger_block())
+            ui.print_warning("连续 12 轮无产出，已停止本轮")
+            break
 
         if session_id:
             try:
@@ -344,7 +464,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
             except Exception:
                 pass
 
-    if tool_iterations > MAX_TOOL_ITERATIONS:
+    if tool_iterations >= MAX_TOOL_ITERATIONS:
         final_text = f"[警告] 达到最大工具调用轮数 ({MAX_TOOL_ITERATIONS})，任务可能未完成。"
         ui.print_warning(final_text)
 

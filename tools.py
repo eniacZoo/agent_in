@@ -121,7 +121,7 @@ BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "shell",
-            "description": "Execute a shell command and return its output. Use for: running scripts, listing files (ls/dir), git operations, grep/find, package management, etc.",
+            "description": "Execute a shell command and return its output. Use for: running scripts, listing files (ls/dir), git operations, grep/find, package management, etc. On Windows the shell is PowerShell: separate commands with ';', not '&&' or '&'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -216,6 +216,11 @@ def _detect_shell():
             return ["sh", "-c"]
         else:
             return ["/bin/sh", "-c"]
+
+
+def shell_name():
+    """返回当前 shell 可执行名，用于写进 system prompt。"""
+    return _detect_shell()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -322,14 +327,17 @@ def _security_gate(tool_name, args, confirm_fn, input_fn, session_id):
 
     if tool_name == "write_file":
         path = _resolve_path(args.get("path", ""))
-        blocked = _apply_verdict(
-            tool_guard.assess_overwrite(str(path)),
-            tool_name, "file_write", confirm_fn, input_fn, session_id)
-        if blocked is not None:
-            return blocked
+        if not tool_guard.is_under_temp(str(path), WORK_DIR):
+            blocked = _apply_verdict(
+                tool_guard.assess_overwrite(str(path)),
+                tool_name, "file_write", confirm_fn, input_fn, session_id)
+            if blocked is not None:
+                return blocked
 
     if tool_name == "edit_file":
         path = _resolve_path(args.get("path", ""))
+        if tool_guard.is_under_temp(str(path), WORK_DIR):
+            return None
         old_text = args.get("old_text", "")
         if path.exists() and path.is_file() and old_text:
             content, _enc = _read_text(path)

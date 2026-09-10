@@ -62,14 +62,14 @@ class Plan12Tests(unittest.TestCase):
         with redirect_stdout(buf):
             self.assertTrue(commands.handle("/ls skills", st))
         text = buf.getvalue()
-        self.assertIn("读pptx", text)
-        self.assertIn("读xlsx", text)
-        self.assertIn("读docx", text)
-        self.assertIn("读pdf", text)
+        self.assertIn("xlsx", text)
+        self.assertIn("docx", text)
+        self.assertIn("pptx", text)
+        self.assertIn("pdf", text)
         self.assertIn("周报转docx", text)
 
     def test_system_prompt_indexes_pptx_skill(self):
-        self.assertIn("读pptx", loop.DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("xlsx.md", loop.DEFAULT_SYSTEM_PROMPT)
         self.assertIn("禁止 pip", loop.DEFAULT_SYSTEM_PROMPT)
 
     def test_tools_still_five(self):

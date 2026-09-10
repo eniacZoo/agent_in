@@ -19,7 +19,8 @@ import json
 # 常量
 # ---------------------------------------------------------------------------
 TOOL_TRUNCATE_THRESHOLD = 2000  # tool result 超过此长度才截断
-TOOL_KEEP_CHARS = 500           # 截断后保留前 N 字符
+TOOL_KEEP_CHARS = 2000           # 截断后保留前 N 字符
+TOOLCALL_ARG_KEEP_CHARS = 200    # 旧 tool_call 大参数保留的前 N 字符
 SUMMARIZE_RATIO = 0.80          # > context_limit * 0.8 触发摘要
 OVERFLOW_RATIO = 0.90           # > context_limit * 0.9 触发滑动窗口
 RECENT_KEEP = 6                 # 摘要时保留最近 K 轮
@@ -91,6 +92,62 @@ def trim_tool_results(messages: list, keep_last: int = 1) -> tuple:
             saved_chars += (original_len - len(truncated))
 
     return new_messages, saved_chars
+
+
+def trim_tool_call_args(messages: list, keep_last: int = 2) -> tuple:
+    """
+    对较旧的 assistant.tool_calls 参数瘦身：
+    write_file.content / edit_file.old_text / edit_file.new_text
+    只留前 TOOLCALL_ARG_KEEP_CHARS 字符 + 长度提示。
+
+    最近 keep_last 条带 tool_calls 的 assistant 消息不动。
+    返回 (new_messages, saved_chars)
+    """
+    BIG_KEYS = ("content", "old_text", "new_text")
+    idxs = [i for i, m in enumerate(messages)
+            if m.get("role") == "assistant" and m.get("tool_calls")]
+    skip = set(idxs[-keep_last:] if keep_last > 0 else [])
+
+    new_messages = [dict(m) for m in messages]
+    saved = 0
+    for i in idxs:
+        if i in skip:
+            continue
+        tcs = []
+        changed = False
+        for tc in new_messages[i]["tool_calls"]:
+            fn = (tc.get("function") or {})
+            raw = fn.get("arguments") or ""
+            try:
+                args = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                tcs.append(tc)
+                continue
+            if not isinstance(args, dict):
+                tcs.append(tc)
+                continue
+            hit = False
+            for k in BIG_KEYS:
+                v = args.get(k)
+                if isinstance(v, str) and len(v) > TOOLCALL_ARG_KEEP_CHARS:
+                    args[k] = v[:TOOLCALL_ARG_KEEP_CHARS] + \
+                        f"…(trimmed {len(v) - TOOLCALL_ARG_KEEP_CHARS} chars，需要时 read_file 重取)"
+                    hit = True
+            if not hit:
+                tcs.append(tc)
+                continue
+            new_raw = json.dumps(args, ensure_ascii=False)
+            saved += len(raw) - len(new_raw)
+            new_tc = dict(tc)
+            new_fn = dict(fn)
+            new_fn["arguments"] = new_raw
+            new_tc["function"] = new_fn
+            tcs.append(new_tc)
+            changed = True
+        if changed:
+            new_messages[i] = dict(new_messages[i])
+            new_messages[i]["tool_calls"] = tcs
+    return new_messages, saved
 
 
 # ---------------------------------------------------------------------------
@@ -211,17 +268,18 @@ def plan(messages, used_tokens, limit, recent_keep=RECENT_KEEP) -> str:
 
 def apply(messages: list, used_tokens: int, limit: int,
           llm_chat_fn=None, auto_summarize: bool = True,
-          recent_keep: int = RECENT_KEEP) -> tuple:
+          recent_keep: int = RECENT_KEEP, budget: int = 0) -> tuple:
     """
     自动上下文管理入口。
 
     参数：
         messages: 完整 messages（含 system）
-        used_tokens: 上一次 LLM 调用的 prompt_tokens
+        used_tokens: 上一次 LLM 调用的 prompt_tokens（不是累计值）
         limit: context_limit
         llm_chat_fn: 可选的 LLM callable（用于摘要）
         auto_summarize: 是否启用摘要
         recent_keep: 保留最近 K 轮
+        budget: 单次请求 prompt 预算，超出则加压。0 = 不启用预算档
 
     返回：
         (processed_messages, action_description)
@@ -229,35 +287,39 @@ def apply(messages: list, used_tokens: int, limit: int,
     if not messages or limit <= 0 or used_tokens <= 0:
         return messages, "none"
 
-    percent = used_tokens / limit * 100
     actions = []
+    over_budget = budget > 0 and used_tokens > budget
 
-    # --- 策略 1: 工具结果截断（始终做，零成本）---
-    # keep_last=1：只保留最近 1 个 tool 消息不截断，其余超长的都截
-    messages, saved_chars = trim_tool_results(messages, keep_last=1)
-    if saved_chars > 0:
-        actions.append(f"trim_tools(saved {saved_chars} chars)")
+    tool_keep = 2 if over_budget else 6
+    arg_keep = 1 if over_budget else 2
 
-    # 截断后重新估算 token（无 LLM 成本）
+    messages, saved_tools = trim_tool_results(messages, keep_last=tool_keep)
+    if saved_tools > 0:
+        actions.append(f"trim_tools(saved {saved_tools} chars)")
+
+    messages, saved_args = trim_tool_call_args(messages, keep_last=arg_keep)
+    if saved_args > 0:
+        actions.append(f"trim_args(saved {saved_args} chars)")
+
+    if over_budget:
+        actions.append(f"over_budget({used_tokens}>{budget})")
+
     est_tokens = _estimate_tokens(messages)
 
-    # --- 策略 2: 历史摘要（> 80%）---
     if auto_summarize and llm_chat_fn and est_tokens / limit * 100 > SUMMARIZE_RATIO * 100:
         new_messages, summarized = _do_summarize(messages, llm_chat_fn, recent_keep)
         if new_messages is not None:
             messages = new_messages
             actions.append(f"summarize_old({summarized} rounds)")
-            est_tokens = _estimate_tokens(messages)  # 摘要后重新估算
+            est_tokens = _estimate_tokens(messages)
 
-    # --- 策略 3: 滑动窗口兜底（> 90%）---
     if est_tokens / limit * 100 > OVERFLOW_RATIO * 100:
         new_messages, removed = sliding_window(messages, recent_keep)
         if removed > 0:
             messages = new_messages
             actions.append(f"sliding_window(removed {removed} msgs)")
 
-    action_str = ",".join(actions) if actions else "none"
-    return messages, action_str
+    return messages, (",".join(actions) if actions else "none")
 
 
 def _do_summarize(messages: list, llm_chat_fn, recent_keep: int) -> tuple:

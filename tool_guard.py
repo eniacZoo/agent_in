@@ -374,6 +374,11 @@ def _is_under_temp(path_str, work_dir):
         return False
 
 
+def is_under_temp(path_str, work_dir):
+    """路径是否位于 {work_dir}/temp（含自身）。"""
+    return _is_under_temp(path_str, work_dir)
+
+
 def _allow_temp_deletes(verdict, command, work_dir):
     """删除类规则：目标全部在 work_dir/temp 下则放行（其它命中仍保留）。"""
     findings = list(verdict.get("findings") or [])

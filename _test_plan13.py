@@ -42,7 +42,7 @@ class Plan13Tests(unittest.TestCase):
     def test_web_skill_and_prompt(self):
         p = Path(__file__).with_name("skills") / "读网页.md"
         self.assertTrue(p.is_file())
-        self.assertIn("读网页", loop.DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("网页", loop.DEFAULT_SYSTEM_PROMPT)
         self.assertIn("temp/", loop.DEFAULT_SYSTEM_PROMPT)
 
     def test_ensure_temp_dir(self):

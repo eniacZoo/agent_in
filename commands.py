@@ -27,6 +27,8 @@ import usage
 import memory_manager
 import skill_manager
 import loop
+import heartbeat
+import debug
 
 
 _C_GRAY = ui.C_GRAY
@@ -102,6 +104,7 @@ def _cmd_new(state, _arg):
     state.total_prompt = 0
     state.total_completion = 0
     state.turn = 0
+    loop.ledger_clear()
     print(f"  {_c('[new session: ' + state.sid + ']', _C_GRAY)}")
 
 
@@ -185,6 +188,15 @@ def _cmd_status(state, _arg):
     pct = used / limit * 100
     print(f"   上下文: {pct:.0f}% ({ui.fmt_tokens(used)}/{ui.fmt_tokens(limit)})")
     print(f"   本轮工具轮次: {loop.LAST_TOOL_ROUNDS}")
+    print(f"   连接: {'yes' if getattr(llm, 'CONNECTED', False) else 'DISCONNECTED'}")
+    hb = heartbeat.LAST or {}
+    if hb:
+        stage = hb.get("stage", "")
+        ok = "ok" if hb.get("ok") else "fail"
+        print(f"   心跳: {ok}  stage={stage}  {hb.get('elapsed_ms', 0)}ms  {hb.get('error', '')[:60]}")
+    ttfb = getattr(llm, "LAST_TTFB_MS", 0)
+    if ttfb:
+        print(f"   上次 TTFB: {ttfb}ms")
 
 
 def _cmd_history(state, _arg):
@@ -272,6 +284,14 @@ _MODEL_ALIASES = {
     "qw": "office",
     "office": "office",
 }
+_EFFORTS = ("low", "medium", "xhigh")
+
+
+def _save_effort(effort):
+    cfg = dict(config.load())
+    cfg["reasoning_effort"] = effort
+    config.save(cfg)
+    config.load(force_reload=True)
 
 
 def _resolve_model_to_provider(arg):
@@ -297,17 +317,36 @@ def _resolve_model_to_provider(arg):
 
 
 def _cmd_model(state, arg):
-    if not arg.strip():
+    tokens = arg.split() if arg else []
+    effort = None
+    if tokens:
+        last = tokens[-1].lower()
+        if last in ("high", "max", "minimal", "none"):
+            print(f"  {_c(ui.ICO_FAIL + ' 思考强度只用 low / medium / xhigh', _C_RED)}")
+            return
+        if last in _EFFORTS:
+            effort = last
+            tokens = tokens[:-1]
+    provider_arg = " ".join(tokens).strip()
+
+    if effort:
+        _save_effort(effort)
+        print(f"  {_c(ui.ICO_OK + ' 思考强度: ' + effort, _C_GREEN)}")
+
+    if not provider_arg:
+        if effort:
+            return
         provs = providers.get_all()
         active = providers.get_active_name()
         cur = llm.MODEL
+        think = config.get("reasoning_effort", "low")
         print()
-        print(f"   当前: {_c(cur, _C_GREEN)}  ({active})")
+        print(f"   当前: {_c(cur, _C_GREEN)}  ({active})  think={think}")
         print(f"   {_c('/model deepseek', _C_CYAN)}  — DeepSeek  {provs.get('default', {}).get('model', '')}")
-        print(f"   {_c('/model qwen', _C_CYAN)}      — 办公 Qwen  {provs.get('office', {}).get('model', '')}")
+        print(f"   {_c('/model qwen [low|medium|xhigh]', _C_CYAN)}  — 办公 Qwen  {provs.get('office', {}).get('model', '')}")
         print()
         return
-    target = _resolve_model_to_provider(arg)
+    target = _resolve_model_to_provider(provider_arg)
     if target is None:
         print(f"  {_c(ui.ICO_FAIL + ' 未知模型，用 /model deepseek 或 /model qwen', _C_RED)}")
         return
@@ -416,6 +455,24 @@ def _cmd_del(_state, arg):
         print(f"  {msg}")
 
 
+def _cmd_debug(state, arg):
+    a = (arg or "").strip().lower()
+    if a in ("on", "1", "true"):
+        debug.start(state.sid)
+        print(f"  {_c(ui.ICO_OK + ' debug 已开启 → logs/debug/' + state.sid, _C_GREEN)}")
+        return
+    if a in ("off", "0", "false"):
+        debug.stop()
+        print(f"  {_c(ui.ICO_OK + ' debug 已关闭', _C_GREEN)}")
+        return
+    if a in ("report", "rep"):
+        p = debug.write_report(state.sid)
+        print(f"  {_c(ui.ICO_OK + ' 报告: ' + str(p), _C_GREEN)}")
+        return
+    print(f"  debug: {'ON' if debug.ENABLED else 'OFF'}  session={state.sid}")
+    print(f"  {_c('/debug on|off|report', _C_CYAN)}")
+
+
 def _cmd_logs(_state, arg):
     n = 20
     if arg:
@@ -452,4 +509,5 @@ _COMMANDS = {
     "/use": _cmd_use,
     "/del": _cmd_del,
     "/read-skill": _cmd_read_skill,
+    "/debug": _cmd_debug,
 }

@@ -28,6 +28,7 @@ import session
 import usage
 import loop
 import commands
+import heartbeat
 
 
 _C_GRAY = ui.C_GRAY
@@ -108,7 +109,8 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
 
     ui.print_banner(model or llm.MODEL, llm.BASE_URL, work_dir, loop.SHOW_REASONING,
                     safe_mode=tools.SAFE_MODE, context_limit=loop.CONTEXT_LIMIT,
-                    capability=llm.CAPABILITY)
+                    capability=llm.CAPABILITY, connected=True,
+                    thinking=config.get("reasoning_effort", "low"))
     ui.turn_header(1, sid)
     print(f"  {ui.ICO_USER} {prompt}")
 
@@ -125,7 +127,9 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
         print()
     ui.turn_footer(
         {"prompt_tokens": pt, "completion_tokens": ct} if pt else None,
-        elapsed
+        elapsed,
+        rounds=loop.LAST_TOOL_ROUNDS,
+        peak=loop.LAST_PEAK_PROMPT,
     )
     total_prompt = total_prompt_prev + pt
     total_completion = total_completion_prev + ct
@@ -151,21 +155,64 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     print("  bye\n")
 
 
+def _read_multiline():
+    """多行输入，单独一行 . 结束。"""
+    print("  (多行模式：粘贴内容，单独一行输入 . 结束)")
+    lines = []
+    while True:
+        try:
+            line = input("  | ")
+        except (EOFError, KeyboardInterrupt):
+            break
+        if line.strip() == ".":
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _drain_pasted_lines(first):
+    """粘贴时后续行已在控制台缓冲区，尽力一次读完并合并。仅 Windows。"""
+    if sys.platform != "win32":
+        return first
+    try:
+        import msvcrt
+        import time as _t
+        extra = []
+        _t.sleep(0.05)
+        while msvcrt.kbhit():
+            extra.append(input())
+            _t.sleep(0.02)
+        if extra:
+            return "\n".join([first] + extra).strip()
+    except Exception:
+        pass
+    return first
+
+
 def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=None):
     """交互模式：斜杠命令交给 commands.handle，其余走 loop.agent_loop。"""
     work_dir = os.path.abspath(work_dir)
     tools.WORK_DIR = work_dir
     tools.ensure_temp_dir(work_dir)
 
+    hb = heartbeat.ping(llm.BASE_URL)
+    if hb.get("ok"):
+        logger.info("heartbeat_ok", hb)
+    else:
+        logger.warn("heartbeat_fail", hb)
+
     ok, msg, cap = llm.check_connection(model=model, probe=probe)
-    if not ok:
+    if ok:
+        loop.apply_capability(cap)
+    else:
         ui.print_error(msg)
-        sys.exit(1)
-    loop.apply_capability(cap)
+        logger.error("connection_lost", {"error": msg})
+        cap = {}
 
     ui.print_banner(model or llm.MODEL, llm.BASE_URL, work_dir, loop.SHOW_REASONING,
                     safe_mode=tools.SAFE_MODE, context_limit=loop.CONTEXT_LIMIT,
-                    capability=llm.CAPABILITY)
+                    capability=llm.CAPABILITY, connected=ok,
+                    thinking=config.get("reasoning_effort", "low"))
 
     sid, messages, total_prompt, total_completion = _load_resume(resume, session_id)
     turn = len([m for m in messages if m.get("role") == "user"]) if messages else 0
@@ -178,10 +225,24 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
 
     while True:
         try:
-            prompt = input(f"  {_c('>', _C_CYAN)} ").strip()
+            prompt = input(f"  {_c('>', _C_CYAN)} ")
         except (EOFError, KeyboardInterrupt):
             print()
             break
+
+        prompt = _drain_pasted_lines(prompt.rstrip("\n")).strip()
+        if not prompt:
+            continue
+
+        if "\n" in prompt and prompt.lstrip().startswith("/"):
+            first, rest = prompt.split("\n", 1)
+            if first.strip() == "/paste":
+                prompt = rest.strip() or _read_multiline()
+            else:
+                print("  (已忽略粘贴的多余行，斜杠命令只取第一行)")
+                prompt = first.strip()
+        elif prompt == "/paste":
+            prompt = _read_multiline()
 
         if not prompt:
             continue
@@ -204,7 +265,13 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
             prev_prompt=state.total_prompt, prev_completion=state.total_completion,
         )
 
-        if reply:
+        if reply == "[已中止]":
+            state.messages.append({
+                "role": "assistant",
+                "content": "（上一轮被用户中止，未完成。已完成的操作见系统提示中的台账。）",
+            })
+            print()
+        elif reply:
             state.messages.append({"role": "assistant", "content": reply})
             print()
 
@@ -213,7 +280,12 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
 
         try:
             saved = [m for m in full_messages if m.get("role") != "system"]
-            if reply:
+            if reply == "[已中止]":
+                saved.append({
+                    "role": "assistant",
+                    "content": "（上一轮被用户中止，未完成。已完成的操作见系统提示中的台账。）",
+                })
+            elif reply:
                 saved.append({"role": "assistant", "content": reply})
             session.save(state.sid, saved, meta={
                 "provider": config.get("provider", "default"),
@@ -227,7 +299,9 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
 
         ui.turn_footer(
             {"prompt_tokens": pt, "completion_tokens": ct} if pt else None,
-            elapsed
+            elapsed,
+            rounds=loop.LAST_TOOL_ROUNDS,
+            peak=loop.LAST_PEAK_PROMPT,
         )
         logger.info("turn_end", {"turn": state.turn, "session_id": state.sid,
                                   "prompt_tokens": pt, "completion_tokens": ct,
@@ -295,7 +369,7 @@ Examples:
     cfg = config.load(cli_overrides)
 
     loop.CONTEXT_LIMIT = cfg.get("context_limit", 196000)
-    loop.MAX_TOOL_ITERATIONS = cfg.get("max_tool_iterations", 20)
+    loop.MAX_TOOL_ITERATIONS = cfg.get("max_tool_iterations", 80)
     tools.SAFE_MODE = bool(cfg.get("safe_mode", True))
 
     active_name = args.provider or cfg.get("provider", "default")

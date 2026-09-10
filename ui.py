@@ -200,10 +200,13 @@ def turn_sep(label=""):
         print("   " + "\u2500" * (W - 4))
 
 
-def turn_footer(usage=None, elapsed=None):
+def turn_footer(usage=None, elapsed=None, rounds=0, peak=0):
     turn_sep()
     if usage:
-        line = f"  in {fmt_tokens(usage.get('prompt_tokens', 0)):<8} out {fmt_tokens(usage.get('completion_tokens', 0)):<8}"
+        line = f"  in {fmt_tokens(usage.get('prompt_tokens', 0)):<8}"
+        if rounds:
+            line += f"(累计 {rounds} 轮，峰值 {fmt_tokens(peak)})"
+        line += f" out {fmt_tokens(usage.get('completion_tokens', 0)):<8}"
         if elapsed is not None:
             line += f"  \u23f1 {elapsed:.1f}s"
         # reasoning tokens
@@ -604,7 +607,8 @@ def print_image_loaded(path, size_kb):
 # 横幅 & 汇总
 # ---------------------------------------------------------------------------
 def print_banner(model, base_url, work_dir, show_reasoning, safe_mode=None,
-                 context_limit=None, capability=None):
+                 context_limit=None, capability=None, connected=None,
+                 thinking=None):
     print()
     print(f"  {'=' * W}")
     print(f"   {_color('agent_in', C_BOLD)} — Minimal CLI Agent  v{APP_VERSION}")
@@ -618,6 +622,10 @@ def print_banner(model, base_url, work_dir, show_reasoning, safe_mode=None,
     print(f"   Code Prev  : {'ON' if STREAM_CODE else 'OFF'}")
     if safe_mode is not None:
         print(f"   SAFE_MODE  : {'ON' if safe_mode else 'OFF'}")
+    if connected is not None:
+        print(f"   Connected  : {'yes' if connected else 'DISCONNECTED'}")
+    if thinking:
+        print(f"   Think      : {thinking}")
     if capability:
         tc = capability.get("tool_call")
         vi = capability.get("vision")
@@ -653,7 +661,7 @@ def print_help():
     print("     /history             — 消息历史")
     print("     /config              — 当前配置")
     print("     /provider [name]     — 切换 provider")
-    print("     /model [deepseek|qwen] — 切换 DeepSeek / 办公 Qwen")
+    print("     /model [deepseek|qwen] [low|medium|xhigh] — 切换模型 / 思考强度")
     print("     /probe [force]       — 探测模型能力")
     print("     /memory              — 查看记忆")
     print("     /memory add <text>   — 追加记忆")
@@ -664,5 +672,7 @@ def print_help():
     print("     /use <name> [path]   — 手动执行脚本 skill")
     print("     /del <name>          — 删除脚本 skill")
     print("     /logs [n]            — 最近日志")
+    print("     /debug on|off|report — 长链路交互记录")
+    print("     /paste               — 多行粘贴（单独一行 . 结束）")
     print("     /help                — 显示本帮助")
     print(f"  {'-' * W}")

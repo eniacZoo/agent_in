@@ -25,8 +25,10 @@ _DEFAULTS = {
     "shell_timeout": 60,
     "log_level": "INFO",
     "safe_mode": True,
-    "max_tool_iterations": 20,
+    "max_tool_iterations": 80,
     "auto_summarize": True,
+    "reasoning_effort": "low",
+    "compact_at_tokens": 40000,  # 单次请求 prompt 超过此值即加压压缩
     # H 系列（v5.0）
     "max_retries": 3,           # H1: 连接阶段最大重试次数
     "retry_base_delay": 1.0,    # H1: 指数退避基准秒数
@@ -52,7 +54,7 @@ _DEFAULTS = {
 _WHITELIST = {
     "work_dir", "provider", "max_tokens", "context_limit",
     "shell_timeout", "log_level", "safe_mode", "max_tool_iterations",
-    "auto_summarize", "providers",
+    "auto_summarize", "providers", "reasoning_effort", "compact_at_tokens",
     # H 系列（v5.0）
     "max_retries", "retry_base_delay", "rate_limit",
     "capability_ttl_days", "auto_probe",

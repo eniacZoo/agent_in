@@ -49,6 +49,9 @@ CONSECUTIVE_FAILURE_THRESHOLD = 3
 # H4: 当前模型能力（check_connection 填充），tools.py 读 llm.CAPABILITY 做降级
 # 结构：{"tool_call": bool, "vision": bool, "max_context": int|None, "probed_at": ts}
 CAPABILITY: dict = {}
+CONNECTED = False
+LAST_TTFB_MS = 0
+STREAM_STALL_SEC = 60
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,20 @@ def _headers():
         "Content-Type": "application/json",
         "Authorization": f"Bearer {API_KEY}",
     }
+
+
+REASONING_EFFORTS = ("low", "medium", "xhigh")
+
+
+def _attach_thinking(payload):
+    """办公 Qwen 带上 enable_thinking + reasoning_effort；DeepSeek 不发。"""
+    if providers.get_active_name() != "office":
+        return
+    effort = str(config.get("reasoning_effort", "low") or "low").lower()
+    if effort not in REASONING_EFFORTS:
+        effort = "low"
+    payload["enable_thinking"] = True
+    payload["reasoning_effort"] = effort
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +113,15 @@ def _inject_images(messages, images):
     return out
 
 
+# API 认识的字段白名单；reasoning_content 等本地字段不外发（省 input token）
+_API_MSG_KEYS = {"role", "content", "name", "tool_calls", "tool_call_id"}
+
+
+def _sanitize_messages(messages):
+    """只保留 API 字段。本地审计字段（reasoning_content 等）不进 payload。"""
+    return [{k: v for k, v in m.items() if k in _API_MSG_KEYS} for m in messages]
+
+
 # ---------------------------------------------------------------------------
 # 核心接口
 # ---------------------------------------------------------------------------
@@ -126,6 +152,7 @@ def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=
     # v3.0 多模态：将图片注入最后一条 user message
     if images:
         messages = _inject_images(messages, images)
+    messages = _sanitize_messages(messages)
 
     logger.info("llm_request", {
         "model": model,
@@ -144,6 +171,7 @@ def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    _attach_thinking(payload)
 
     req = urllib.request.Request(
         f"{BASE_URL}/chat/completions",
@@ -302,15 +330,24 @@ def _chat_stream(req, on_429=None):
         yield err_chunk
         return
 
+    global LAST_TTFB_MS
+    LAST_TTFB_MS = int((time.time() - t0) * 1000)
+    logger.info("llm_ttfb_ms", {"ms": LAST_TTFB_MS})
     logger.debug("llm_stream_start", {"t0_ms": int(time.time() * 1000)})
 
     # 用于拼接 tool_call arguments（可能分多个 chunk 到达）
     pending_tool_calls = {}  # index -> {"id":..., "name":..., "args_parts": []}
 
     stream_ok = True
+    last_chunk_t = time.time()
     try:
         with resp:
             for raw in resp:
+                now = time.time()
+                idle = now - last_chunk_t
+                if idle >= STREAM_STALL_SEC:
+                    logger.warn("stream_stall", {"idle_s": round(idle, 1)})
+                last_chunk_t = now
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
                     continue
@@ -420,6 +457,7 @@ def check_connection(model=None, probe=None):
         capability 结构见 CAPABILITY；未探测时为 {}。
         向后兼容：调用方仍可用 `ok, msg = ...` 取前两个，第三项按需取。
     """
+    global CAPABILITY, CONNECTED
     model = model or MODEL
     payload = {
         "model": model,
@@ -439,6 +477,7 @@ def check_connection(model=None, probe=None):
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:200]
         logger.error("connection_lost", {"status": e.code, "body": body[:100]})
+        CONNECTED = False
         if e.code == 401:
             return False, f"认证失败 (401): {body}", {}
         elif e.code == 404:
@@ -447,12 +486,12 @@ def check_connection(model=None, probe=None):
             return False, f"HTTP {e.code}: {body}", {}
     except Exception as e:
         logger.error("connection_lost", {"error": str(e)[:100]})
+        CONNECTED = False
         return False, f"连接失败: {e}", {}
 
     logger.info("connection_ok", {"model": model})
 
     # H4: 连通 OK 后懒加载能力（有缓存不 probe）
-    global CAPABILITY
     do_probe = (config.get("auto_probe", 1) in (1, True, "1", "true", "yes")) if probe is None else bool(probe)
     cap = {}
     if do_probe:
@@ -475,4 +514,5 @@ def check_connection(model=None, probe=None):
             logger.warn("capability_probe_failed", {"model": model, "error": str(e)[:120]})
             cap = {}
     CAPABILITY = cap
+    CONNECTED = True
     return True, f"OK (model={model})", cap

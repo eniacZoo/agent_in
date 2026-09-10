@@ -1,6 +1,9 @@
 {
   "provider": "default",
   "safe_mode": true,
+  "max_tool_iterations": 80,
+  "reasoning_effort": "low",
+  "compact_at_tokens": 40000,
   "providers": {
     "default": {
       "base_url": "https://api.deepseek.com",
