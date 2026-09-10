@@ -7,7 +7,8 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import commands
 import loop
@@ -24,7 +25,7 @@ CORE_FILES = [
 
 class Plan10UiTests(unittest.TestCase):
     def _root(self):
-        return os.path.dirname(os.path.abspath(__file__))
+        return _ROOT
 
     def test_icons_encode_gbk(self):
         for name in dir(ui):

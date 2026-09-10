@@ -11,7 +11,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import config
 import context
@@ -96,7 +97,7 @@ class Phase1SessionTests(unittest.TestCase):
         self.assertEqual(out[0]["role"], "user")
 
     def test_no_duplicate_final_reply(self):
-        src = Path(__file__).with_name("agent.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "agent.py").read_text(encoding="utf-8")
         self.assertNotIn('saved.append({"role": "assistant", "content": reply})', src)
         self.assertIn('state.messages = [m for m in full_messages if m.get("role") != "system"]', src)
 
@@ -119,7 +120,7 @@ class Phase2HarnessTests(unittest.TestCase):
             out = tools._exec_read_file({"path": xlsx})
             self.assertIn("SheetA", out)
             self.assertNotIn("16383", out)
-            src = Path(__file__).with_name("tools.py").read_text(encoding="utf-8")
+            src = (Path(_ROOT) / "tools.py").read_text(encoding="utf-8")
             self.assertNotIn("range(1, ws.max_column", src)
         finally:
             shutil.rmtree(td, ignore_errors=True)

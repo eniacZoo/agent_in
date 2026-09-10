@@ -11,7 +11,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import commands
 import skill_manager
@@ -98,7 +99,7 @@ class Plan9SkillTests(unittest.TestCase):
         wd = tempfile.mkdtemp(prefix="agent_in_xlsx_")
         xlsx = os.path.join(wd, "t.xlsx")
         _write_xlsx(xlsx, [["品名", "数量"], ["钢笔", "3"]])
-        entry = str(Path(__file__).with_name("skills") / "read_xlsx" / "main.py")
+        entry = str((Path(_ROOT) / "skills") / "read_xlsx" / "main.py")
         old = os.environ.get("WORK_DIR")
         os.environ["WORK_DIR"] = wd
         try:
@@ -117,13 +118,13 @@ class Plan9SkillTests(unittest.TestCase):
         self.assertIn("钢笔", out)
 
     def test_pythonpath_includes_vendor(self):
-        src = Path(__file__).with_name("skill_manager.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "skill_manager.py").read_text(encoding="utf-8")
         self.assertIn("PYTHONPATH", src)
         self.assertIn("VENDOR_DIR", src)
-        self.assertTrue((Path(__file__).with_name("vendor") / "README.md").is_file())
+        self.assertTrue(((Path(_ROOT) / "vendor") / "README.md").is_file())
 
     def test_vendor_office_imports(self):
-        vendor = str(Path(__file__).with_name("vendor"))
+        vendor = str((Path(_ROOT) / "vendor"))
         sys.path.insert(0, vendor)
         try:
             import openpyxl
@@ -158,7 +159,7 @@ class Plan9SkillTests(unittest.TestCase):
         self.assertIn("read_xlsx", text)
 
     def test_no_auto_write_skill(self):
-        src = Path(__file__).with_name("agent.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "agent.py").read_text(encoding="utf-8")
         self.assertNotIn("记住", src)
         self.assertNotIn("save_skill", src)
 

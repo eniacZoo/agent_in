@@ -9,7 +9,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import llm
 import loop
@@ -133,7 +134,7 @@ class Plan11Tests(unittest.TestCase):
             with redirect_stdout(buf):
                 text, *_rest = loop.agent_loop(
                     [{"role": "user", "content": "x"}],
-                    os.path.dirname(os.path.abspath(__file__)),
+                    _ROOT,
                     verbose=True,
                     interactive=False,
                 )

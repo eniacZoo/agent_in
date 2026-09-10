@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import loop
 import tool_guard
@@ -40,7 +41,7 @@ class Plan13Tests(unittest.TestCase):
         self.assertEqual(v2["action"], tool_guard.ACTION_BLOCK)
 
     def test_web_skill_and_prompt(self):
-        p = Path(__file__).with_name("skills") / "读网页.md"
+        p = (Path(_ROOT) / "skills") / "读网页.md"
         self.assertTrue(p.is_file())
         self.assertIn("网页", loop.DEFAULT_SYSTEM_PROMPT)
         self.assertIn("temp/", loop.DEFAULT_SYSTEM_PROMPT)

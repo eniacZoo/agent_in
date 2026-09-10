@@ -55,7 +55,7 @@ DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本�
 4. 当前 shell 是 {shell}。PowerShell 下多条命令用 `;` 分隔，不要用 `&&` 或 `&`，不要用 `cd /d`，用 `Set-Location`。Windows 列目录用 Get-ChildItem。不要用 shell 做删除，除非用户明确要求。草稿只写 {work_dir}/temp/（可删）。用户要的 html/xlsx/docx/pptx/pdf 写到指定路径（可在工作目录外，会先确认），写完就停。长任务摘要写入 {work_dir}/temp/task_notes.md
 5. 用户提到图片时先 view_image
 6. 完成后用 1-2 句话总结
-7. 办公文件先 read_file 对应流程（不要一次读完全部）：skills/xlsx.md、skills/docx.md、skills/pptx.md、skills/pdf.md；网页 skills/网页.md。周报见 skills/周报转docx.md（先读 docx.md）。包在 vendor/，shell 已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。探结构只把摘要写入 temp/，写一份脚本再跑，报错改脚本，不要把整表整文打进对话。"""
+7. 办公文件先 read_file 对应流程（不要一次读完全部）：skills/xlsx.md、skills/docx.md、skills/pptx.md、skills/pdf.md；网页 skills/网页.md。周报见 skills/周报转docx.md（先读 docx.md）；翻译见 skills/翻译.md（PDF 先读 pdf.md）。包在 vendor/，shell 已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。探结构只把摘要写入 temp/，写一份脚本再跑，报错改脚本，不要把整表整文打进对话。"""
 
 _OFFICE_DISCIPLINE = """
 ## 办公任务纪律

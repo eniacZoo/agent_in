@@ -6,7 +6,8 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import loop
 import tools
@@ -14,12 +15,12 @@ import tools
 
 class Plan19Tests(unittest.TestCase):
     def test_five_skills_exist(self):
-        root = Path(__file__).with_name("skills")
+        root = (Path(_ROOT) / "skills")
         for name in ("xlsx", "docx", "pptx", "pdf", "网页"):
             self.assertTrue((root / (name + ".md")).is_file(), name)
 
     def test_old_names_redirect(self):
-        root = Path(__file__).with_name("skills")
+        root = (Path(_ROOT) / "skills")
         text = (root / "读xlsx.md").read_text(encoding="utf-8")
         self.assertIn("xlsx.md", text)
 

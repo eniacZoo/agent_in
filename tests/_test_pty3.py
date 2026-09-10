@@ -12,9 +12,8 @@ import select
 import sys
 import time
 
-SCRIPT = (
-    "import sys\n"
-    "sys.path.insert(0, '.')\n"
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SCRIPT = "import sys\nsys.path.insert(0, %r)\n" % ROOT + (
     "import ui\n"
     "with ui.Spinner('shell: Remove-Item -Recurse long', delay=0.2):\n"
     "    time = __import__('time'); time.sleep(0.6)\n"

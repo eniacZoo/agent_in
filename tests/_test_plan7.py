@@ -6,7 +6,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import config
 import tool_guard
@@ -96,7 +97,7 @@ class Plan7GuardTests(unittest.TestCase):
             self.assertEqual(f.read(), "aa aa")
 
     def test_no_created_lie_in_source(self):
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools.py")
+        src = os.path.join(_ROOT, "tools.py")
         with open(src, encoding="utf-8") as f:
             self.assertNotIn("Created.", f.read())
 

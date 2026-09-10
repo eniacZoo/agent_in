@@ -7,7 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import config
 import context
@@ -151,7 +152,7 @@ class Phase3Tests(unittest.TestCase):
 
     def test_discipline_always_on(self):
         self.assertIn("立即停止", loop._OFFICE_DISCIPLINE)
-        src = Path(__file__).with_name("loop.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
         self.assertNotIn('== "office"', src)
 
     def test_prompt_no_ampersand_advice(self):
@@ -168,17 +169,17 @@ class Phase4Tests(unittest.TestCase):
         self.assertEqual(len(a[1]), 12)
 
     def test_status_line_in_source(self):
-        src = Path(__file__).with_name("loop.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
         self.assertIn('round {tool_iterations}/{MAX_TOOL_ITERATIONS}', src)
         self.assertIn("产出", src)
 
     def test_stall_stop_in_source(self):
-        src = Path(__file__).with_name("loop.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
         self.assertIn("rounds_since_write >= 12", src)
         self.assertIn("连续 12 轮无文件产出", src)
 
     def test_repeat_warn_in_source(self):
-        src = Path(__file__).with_name("loop.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
         self.assertIn("tool_repeat", src)
         self.assertIn("args_hash", src)
 
@@ -187,7 +188,7 @@ class Phase5Tests(unittest.TestCase):
     def test_max_iter_default(self):
         config._config_cache = None
         self.assertEqual(config.load()["max_tool_iterations"], 80)
-        src = Path(__file__).with_name("agent.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "agent.py").read_text(encoding="utf-8")
         self.assertNotIn('"max_tool_iterations", 20', src)
         self.assertIn('"max_tool_iterations", 80', src)
 
@@ -205,13 +206,13 @@ class Phase5Tests(unittest.TestCase):
         self.assertIn("峰值", out)
 
     def test_multiline_marker(self):
-        src = Path(__file__).with_name("agent.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "agent.py").read_text(encoding="utf-8")
         self.assertIn("_read_multiline", src)
         self.assertIn("/paste", src)
         self.assertIn("_drain_pasted_lines", src)
 
     def test_loop_off_by_one(self):
-        src = Path(__file__).with_name("loop.py").read_text(encoding="utf-8")
+        src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
         self.assertIn("while tool_iterations < MAX_TOOL_ITERATIONS:", src)
         self.assertIn("if tool_iterations >= MAX_TOOL_ITERATIONS:", src)
 

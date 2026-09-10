@@ -7,7 +7,8 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import commands
 import loop
@@ -50,7 +51,7 @@ class Plan8SplitTests(unittest.TestCase):
         self.assertNotEqual(st.sid, "deadbeef")
 
     def test_agent_py_has_no_sessions_branch(self):
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.py")
+        src = os.path.join(_ROOT, "agent.py")
         with open(src, encoding="utf-8") as f:
             text = f.read()
         self.assertNotIn('if prompt == "/sessions"', text)
@@ -59,7 +60,7 @@ class Plan8SplitTests(unittest.TestCase):
         self.assertIn("commands.handle", text)
 
     def test_loop_does_not_import_commands(self):
-        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loop.py")
+        src = os.path.join(_ROOT, "loop.py")
         with open(src, encoding="utf-8") as f:
             lines = [ln.strip() for ln in f]
         imports = [ln for ln in lines if ln.startswith("import ") or ln.startswith("from ")]

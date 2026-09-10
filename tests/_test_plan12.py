@@ -8,7 +8,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import commands
 import loop
@@ -20,7 +21,7 @@ import usage
 class Plan12Tests(unittest.TestCase):
     def setUp(self):
         tool_guard.load_shell_rules.cache_clear()
-        tools.WORK_DIR = os.path.dirname(os.path.abspath(__file__))
+        tools.WORK_DIR = _ROOT
         tools.SAFE_MODE = True
 
     def test_shell_env_puts_vendor_first(self):
@@ -54,7 +55,7 @@ class Plan12Tests(unittest.TestCase):
         self.assertIn("vendor", r)
 
     def test_office_markdown_listed(self):
-        root = Path(__file__).with_name("skills")
+        root = (Path(_ROOT) / "skills")
         for name in ("读pptx", "读xlsx", "读docx", "读pdf"):
             self.assertTrue((root / (name + ".md")).is_file(), name)
         buf = io.StringIO()

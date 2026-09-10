@@ -7,7 +7,8 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _ROOT)
 
 import loop
 import tool_guard
@@ -28,7 +29,7 @@ class Plan22StallTests(unittest.TestCase):
             pass
 
     def test_scratch_does_not_hard_stop(self):
-        loop_py = os.path.join(os.path.dirname(__file__), "loop.py")
+        loop_py = os.path.join(_ROOT, "loop.py")
         with open(loop_py, encoding="utf-8") as f:
             src = f.read()
         self.assertNotIn("连续 40 轮只在 temp/", src)
