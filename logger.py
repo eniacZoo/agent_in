@@ -101,6 +101,9 @@ def _now_iso():
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
 
+_SILENT_TERMINAL_EVENTS = frozenset({"heartbeat_fail", "connection_lost", "llm_error"})
+
+
 def _print_terminal(level, event, data):
     """WARN/ERROR 输出到终端。"""
     ts = datetime.now().strftime("%H:%M:%S")
@@ -154,8 +157,8 @@ def log(level, event, data=None):
     except Exception:
         pass  # 日志写入失败不影响主流程
 
-    # 终端输出
-    if level in ("WARN", "ERROR"):
+    # 终端输出（连接类事件只写文件，避免刷 urlopen 细节）
+    if level in ("WARN", "ERROR") and event not in _SILENT_TERMINAL_EVENTS:
         _print_terminal(level, event, data)
 
 

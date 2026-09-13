@@ -448,8 +448,8 @@ class StreamDisplay:
                 print()
                 self._in_reasoning = False
                 self._in_text = False
-            err_label = _color(ICO_ERR + " ERROR", C_RED)
-            print(f"  {err_label}: {chunk['content']}")
+            err_icon = _color(ICO_ERR, C_RED)
+            print(f"  {err_icon} {chunk['content']}")
 
     def finish(self):
         if self._in_reasoning or self._in_text:
@@ -664,7 +664,7 @@ def print_help():
     print("     /history             — 消息历史")
     print("     /config              — 当前配置")
     print("     /provider [name]     — 切换 provider")
-    print("     /model [deepseek|qwen] [low|medium|xhigh] — 切换模型 / 思考强度")
+    print("     /model [deepseek|qwen|office2] [low|medium|xhigh] — 切换模型 / 思考强度")
     print("     /probe [force]       — 探测模型能力")
     print("     /memory              — 查看记忆")
     print("     /memory add <text>   — 追加记忆")

@@ -155,7 +155,7 @@ def _cmd_resume(state, arg):
 def _cmd_save(state, _arg):
     try:
         p = session.save(state.sid, state.messages, meta={
-            "provider": config.get("provider", "default"),
+            "provider": providers.get_active_name(),
             "model": state.model or llm.MODEL,
             "work_dir": state.work_dir,
             "total_prompt": state.total_prompt,
@@ -191,9 +191,8 @@ def _cmd_status(state, _arg):
     print(f"   连接: {'yes' if getattr(llm, 'CONNECTED', False) else 'DISCONNECTED'}")
     hb = heartbeat.LAST or {}
     if hb:
-        stage = hb.get("stage", "")
         ok = "ok" if hb.get("ok") else "fail"
-        print(f"   心跳: {ok}  stage={stage}  {hb.get('elapsed_ms', 0)}ms  {hb.get('error', '')[:60]}")
+        print(f"   心跳: {ok}  {hb.get('elapsed_ms', 0)}ms")
     ttfb = getattr(llm, "LAST_TTFB_MS", 0)
     if ttfb:
         print(f"   上次 TTFB: {ttfb}ms")
@@ -220,6 +219,7 @@ def _cmd_help(_state, _arg):
 
 def _cmd_config(_state, _arg):
     cfg = config.load()
+    active_name = providers.get_active_name()
     print()
     print(f"   {'Key':<20} {'Value'}")
     print(f"   {'-'*20} {'-'*30}")
@@ -228,10 +228,11 @@ def _cmd_config(_state, _arg):
             print(f"   {k:<20} {list(v.keys())}")
         elif k == "api_key":
             continue
+        elif k == "provider":
+            print(f"   {k:<20} {active_name}")
         else:
             print(f"   {k:<20} {v}")
     provs = cfg.get("providers", {})
-    active_name = cfg.get("provider", "default")
     print(f"\n   Providers (active: {_c(active_name, _C_GREEN)}):")
     for pname, pinfo in provs.items():
         marker = " ←" if pname == active_name else ""
@@ -239,13 +240,26 @@ def _cmd_config(_state, _arg):
     print()
 
 
+def _save_provider(name):
+    cfg = dict(config.load())
+    cfg["provider"] = name
+    config.save(cfg)
+    config.load(force_reload=True)
+
+
 def _switch_to_provider(state, target):
     """切到 named provider，探测连接。target 必须已在 providers 里。"""
     active_p = providers.get_active(target)
     providers.apply_to_llm(active_p)
     providers.set_active_name(target)
+    _save_provider(target)
     state.model = None
     logger.info("provider_switched", {"target": target, "model": active_p.get("model", "")})
+    hb = heartbeat.ping(llm.BASE_URL)
+    if hb.get("ok"):
+        logger.info("heartbeat_ok", hb)
+    else:
+        logger.warn("heartbeat_fail", hb)
     ok, msg, cap = llm.check_connection(model=active_p.get("model"))
     if ok:
         loop.apply_capability(cap)
@@ -253,7 +267,7 @@ def _switch_to_provider(state, target):
         print(f"  {_c(f'{ui.ICO_OK} 已切换到 {target} (model={_m})', _C_GREEN)}")
         loop.print_capability(cap)
     else:
-        print(f"  {_c(f'{ui.ICO_WARN} 已切换到 {target}，但连接检测失败: {msg}', _C_YELLOW)}")
+        print(f"  {_c(f'{ui.ICO_WARN} {msg}', _C_YELLOW)}")
 
 
 def _cmd_provider(state, arg):
@@ -344,11 +358,12 @@ def _cmd_model(state, arg):
         print(f"   当前: {_c(cur, _C_GREEN)}  ({active})  think={think}")
         print(f"   {_c('/model deepseek', _C_CYAN)}  — DeepSeek  {provs.get('default', {}).get('model', '')}")
         print(f"   {_c('/model qwen [low|medium|xhigh]', _C_CYAN)}  — 办公 Qwen  {provs.get('office', {}).get('model', '')}")
+        print(f"   {_c('/model office2 [low|medium|xhigh]', _C_CYAN)}  — office2  {provs.get('office2', {}).get('model', '')}")
         print()
         return
     target = _resolve_model_to_provider(provider_arg)
     if target is None:
-        print(f"  {_c(ui.ICO_FAIL + ' 未知模型，用 /model deepseek 或 /model qwen', _C_RED)}")
+        print(f"  {_c(ui.ICO_FAIL + ' 未知模型，用 /model deepseek、/model qwen 或 /model office2', _C_RED)}")
         return
     _switch_to_provider(state, target)
 
@@ -364,7 +379,7 @@ def _cmd_probe(_state, arg):
         loop.apply_capability(cap)
         loop.print_capability(cap)
     else:
-        print(f"  {_c(f'{ui.ICO_FAIL} 连接检测失败: {msg}', _C_RED)}")
+        print(f"  {_c(f'{ui.ICO_FAIL} {msg}', _C_RED)}")
 
 
 def _cmd_memory(_state, arg):

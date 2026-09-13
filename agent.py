@@ -139,7 +139,7 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     try:
         saved = [m for m in full_messages if m.get("role") != "system"]
         session.save(sid, saved, meta={
-            "provider": config.get("provider", "default"),
+            "provider": providers.get_active_name(),
             "model": model or llm.MODEL,
             "work_dir": work_dir,
             "total_prompt": total_prompt,
@@ -276,7 +276,7 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
 
         try:
             session.save(state.sid, state.messages, meta={
-                "provider": config.get("provider", "default"),
+                "provider": providers.get_active_name(),
                 "model": model or llm.MODEL,
                 "work_dir": work_dir,
                 "total_prompt": state.total_prompt,

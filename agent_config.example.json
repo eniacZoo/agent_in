@@ -15,6 +15,11 @@
       "base_url": "http://127.0.0.1:8088/api/v1",
       "api_key": "YOUR_OFFICE_KEY",
       "model": "AngelOrDevil"
+    },
+    "office2": {
+      "base_url": "http://118.4.78.6:8088/api/v1",
+      "api_key": "YOUR_OFFICE2_KEY",
+      "model": "szicbc-claw-01"
     }
   }
 }

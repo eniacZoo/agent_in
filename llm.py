@@ -67,9 +67,16 @@ def _headers():
 REASONING_EFFORTS = ("low", "medium", "xhigh")
 
 
+def connection_fail_text(model=None):
+    """无法连接时的终端文案（不含底层异常）。"""
+    name = providers.get_active_name()
+    mid = model or MODEL
+    return f"无法连接模型：[{name}][{mid}]，请尝试使用/model、/provider命令进行切换"
+
+
 def _attach_thinking(payload):
-    """办公 Qwen 带上 enable_thinking + reasoning_effort；DeepSeek 不发。"""
-    if providers.get_active_name() != "office":
+    """办公 Qwen / office2 带上 enable_thinking + reasoning_effort；DeepSeek 不发。"""
+    if not str(providers.get_active_name() or "").startswith("office"):
         return
     effort = str(config.get("reasoning_effort", "low") or "low").lower()
     if effort not in REASONING_EFFORTS:
@@ -257,10 +264,9 @@ def _open_with_retry(req, on_429=None):
     consecutive_failures += 1
     if last_code is not None:
         logger.error("llm_error", {"status": last_code, "error": last_body[:200]})
-        err_chunk = {"type": "error", "content": f"HTTP {last_code}: {last_body[:500]}"}
     else:
         logger.error("llm_error", {"error": last_body[:200]})
-        err_chunk = {"type": "error", "content": last_body}
+    err_chunk = {"type": "error", "content": connection_fail_text()}
     _check_consecutive_failures()
     return None, err_chunk
 
@@ -281,7 +287,7 @@ def _chat_non_stream(req, on_429=None):
         consecutive_failures += 1
         logger.error("llm_error", {"error": str(e)[:200]})
         _check_consecutive_failures()
-        yield {"type": "error", "content": str(e)}
+        yield {"type": "error", "content": connection_fail_text()}
         return
 
     logger.info("llm_response", {
@@ -407,7 +413,7 @@ def _chat_stream(req, on_429=None):
         consecutive_failures += 1
         logger.error("llm_error", {"error": str(e)[:200], "mid_stream": True})
         _check_consecutive_failures()
-        yield {"type": "error", "content": f"流中断: {e}"}
+        yield {"type": "error", "content": connection_fail_text()}
 
     if not stream_ok:
         return
@@ -438,7 +444,6 @@ def _check_consecutive_failures():
     global consecutive_failures
     if consecutive_failures >= CONSECUTIVE_FAILURE_THRESHOLD:
         logger.error("connection_lost", {"consecutive_failures": consecutive_failures})
-        print(f"\n    \033[31m[!!] 连续 {consecutive_failures} 次连接失败，API 可能不可用\033[0m")
 
 
 # ---------------------------------------------------------------------------
@@ -478,16 +483,11 @@ def check_connection(model=None, probe=None):
         body = e.read().decode("utf-8", "replace")[:200]
         logger.error("connection_lost", {"status": e.code, "body": body[:100]})
         CONNECTED = False
-        if e.code == 401:
-            return False, f"认证失败 (401): {body}", {}
-        elif e.code == 404:
-            return False, f"模型不存在 (404): {body}", {}
-        else:
-            return False, f"HTTP {e.code}: {body}", {}
+        return False, connection_fail_text(model=model), {}
     except Exception as e:
         logger.error("connection_lost", {"error": str(e)[:100]})
         CONNECTED = False
-        return False, f"连接失败: {e}", {}
+        return False, connection_fail_text(model=model), {}
 
     logger.info("connection_ok", {"model": model})
 

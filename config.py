@@ -48,6 +48,11 @@ _DEFAULTS = {
             "api_key": "",
             "model": "AngelOrDevil",
         },
+        "office2": {
+            "base_url": "http://118.4.78.6:8088/api/v1",
+            "api_key": "",
+            "model": "szicbc-claw-01",
+        },
     },
 }
 

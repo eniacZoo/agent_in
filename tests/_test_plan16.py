@@ -45,6 +45,11 @@ class Plan16Tests(unittest.TestCase):
             llm._attach_thinking(payload)
         self.assertEqual(payload.get("reasoning_effort"), "low")
         self.assertTrue(payload.get("enable_thinking"))
+        payload_o2 = {}
+        with patch.object(llm.providers, "get_active_name", return_value="office2"):
+            llm._attach_thinking(payload_o2)
+        self.assertEqual(payload_o2.get("reasoning_effort"), "low")
+        self.assertTrue(payload_o2.get("enable_thinking"))
         payload2 = {}
         with patch.object(llm.providers, "get_active_name", return_value="default"):
             llm._attach_thinking(payload2)
