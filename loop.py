@@ -408,11 +408,14 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
             return
         try:
             t = tracker.session_total() if tracker else {"prompt": 0, "completion": 0}
-            session.save(session_id, _for_save(transcript), meta={
+            saved = _for_save(transcript)
+            leaf = session.stamp_missing(saved)
+            session.save(session_id, saved, meta={
                 "model": llm.MODEL,
                 "work_dir": work_dir,
                 "total_prompt": prev_prompt + t.get("prompt", 0),
                 "total_completion": prev_completion + t.get("completion", 0),
+                "leaf_id": leaf,
             })
         except Exception:
             pass

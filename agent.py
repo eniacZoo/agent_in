@@ -61,22 +61,22 @@ def _encode_image_paths(image_paths, work_dir):
 
 def _load_resume(resume, session_id):
     """
-    解析 resume 目标，返回 (sid, messages, prev_prompt, prev_completion)。
+    解析 resume 目标，返回 (sid, messages, prev_prompt, prev_completion, leaf_id)。
     resume 为 None 时新建。
     """
     messages = []
     sid = session_id or uuid.uuid4().hex[:8]
     prev_p, prev_c = 0, 0
     if not resume:
-        return sid, messages, prev_p, prev_c
+        return sid, messages, prev_p, prev_c, None
     target_id = resume if resume != "latest" else session.latest()
     if not target_id:
         print(f"  {_c(ui.ICO_FAIL + ' 没有可恢复的会话', _C_RED)}")
-        return sid, messages, prev_p, prev_c
+        return sid, messages, prev_p, prev_c, None
     data = session.load(target_id)
     if not data:
         print(f"  {_c(f'{ui.ICO_FAIL} 会话 {target_id} 不存在或已损坏，新建会话', _C_RED)}")
-        return uuid.uuid4().hex[:8], [], 0, 0
+        return uuid.uuid4().hex[:8], [], 0, 0, None
     meta = data["meta"]
     nmsg = len(data["messages"])
     print(f"  {_c(f'[已恢复会话 {target_id}，{nmsg} 条消息]', _C_GRAY)}")
@@ -85,6 +85,7 @@ def _load_resume(resume, session_id):
         data["messages"],
         meta.get("total_prompt", 0),
         meta.get("total_completion", 0),
+        meta.get("leaf_id"),
     )
 
 
@@ -95,7 +96,7 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     tools.ensure_temp_dir(work_dir)
     loop.reset_context_warnings()
 
-    sid, messages, total_prompt_prev, total_completion_prev = _load_resume(resume, session_id)
+    sid, messages, total_prompt_prev, total_completion_prev, leaf_id = _load_resume(resume, session_id)
     initial_images = _encode_image_paths(image_paths or [], work_dir)
 
     logger.info("session_start", {"session_id": sid, "model": model or llm.MODEL, "resumed": bool(resume)})
@@ -114,13 +115,19 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     ui.turn_header(1, sid)
     print(f"  {ui.ICO_USER} {prompt}")
 
-    messages.append({"role": "user", "content": prompt})
+    user = {"role": "user", "content": prompt}
+    session.stamp_missing([user], fallback_parent=leaf_id)
+    messages.append(user)
+    leaf_id = user["id"]
+    path = session.path_to_leaf(messages, leaf_id)
     tracker = usage.Tracker(sid)
     reply, pt, ct, elapsed, full_messages = loop.agent_loop(
-        messages, work_dir, sid, initial_images=initial_images, tracker=tracker,
+        path, work_dir, sid, initial_images=initial_images, tracker=tracker,
         prev_prompt=total_prompt_prev, prev_completion=total_completion_prev,
         interactive=False,
     )
+    saved_path = [m for m in full_messages if m.get("role") != "system"]
+    leaf_id = session.absorb_path(messages, saved_path)
 
     if reply and reply != "[已中止]":
         print()
@@ -137,13 +144,13 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     ui.print_summary(1, total_prompt, total_completion)
 
     try:
-        saved = [m for m in full_messages if m.get("role") != "system"]
-        session.save(sid, saved, meta={
+        session.save(sid, messages, meta={
             "provider": providers.get_active_name(),
             "model": model or llm.MODEL,
             "work_dir": work_dir,
             "total_prompt": total_prompt,
             "total_completion": total_completion,
+            "leaf_id": leaf_id,
         })
     except Exception:
         pass
@@ -213,13 +220,15 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
                     capability=llm.CAPABILITY, connected=ok,
                     thinking=config.get("reasoning_effort", "low"))
 
-    sid, messages, total_prompt, total_completion = _load_resume(resume, session_id)
-    turn = len([m for m in messages if m.get("role") == "user"]) if messages else 0
+    sid, messages, total_prompt, total_completion, leaf_id = _load_resume(resume, session_id)
+    path0 = session.path_to_leaf(messages, leaf_id)
+    turn = len([m for m in path0 if m.get("role") == "user"]) if path0 else 0
     loop.reset_context_warnings()
     logger.info("session_start", {"session_id": sid, "model": model or llm.MODEL, "resumed": bool(resume)})
     tracker = usage.Tracker(sid)
     state = commands.CliState(
         work_dir, model, sid, messages, total_prompt, total_completion, turn, tracker,
+        leaf_id=leaf_id,
     )
 
     while True:
@@ -256,15 +265,20 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
         print(f"  {ui.ICO_USER} {prompt}")
 
         turn_images = _encode_image_paths(vision.guess_image_files(prompt), work_dir)
-        state.messages.append({"role": "user", "content": prompt})
+        user = {"role": "user", "content": prompt}
+        session.stamp_missing([user], fallback_parent=state.leaf_id)
+        state.messages.append(user)
+        state.leaf_id = user["id"]
+        path = session.path_to_leaf(state.messages, state.leaf_id)
 
         reply, pt, ct, elapsed, full_messages = loop.agent_loop(
-            state.messages, work_dir, state.sid,
+            path, work_dir, state.sid,
             initial_images=turn_images or None, tracker=state.tracker,
             prev_prompt=state.total_prompt, prev_completion=state.total_completion,
         )
 
-        state.messages = [m for m in full_messages if m.get("role") != "system"]
+        saved_path = [m for m in full_messages if m.get("role") != "system"]
+        state.leaf_id = session.absorb_path(state.messages, saved_path)
 
         if reply == "[已中止]":
             print()
@@ -281,6 +295,7 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
                 "work_dir": work_dir,
                 "total_prompt": state.total_prompt,
                 "total_completion": state.total_completion,
+                "leaf_id": state.leaf_id,
             })
         except Exception:
             pass

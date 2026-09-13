@@ -99,7 +99,7 @@ class Phase1SessionTests(unittest.TestCase):
     def test_no_duplicate_final_reply(self):
         src = (Path(_ROOT) / "agent.py").read_text(encoding="utf-8")
         self.assertNotIn('saved.append({"role": "assistant", "content": reply})', src)
-        self.assertIn('state.messages = [m for m in full_messages if m.get("role") != "system"]', src)
+        self.assertIn("session.absorb_path", src)
 
 
 class Phase2HarnessTests(unittest.TestCase):

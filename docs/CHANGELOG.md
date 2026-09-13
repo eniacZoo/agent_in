@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.0 — 2026-09-13
+
+会话树与当前流式块差分渲染。
+
+- 消息带 `id` / `parent`，session 记 `leaf_id`；模型只看到 root → 当前叶
+- `/tree` 看树，`/fork [id]` 分叉；`/history` 只显示当前路径
+- 旧线性 `sessions/*.json` 按数组串成单链，可直接打开
+- thinking / ai 未完成块按行差分重绘（stdlib ANSI，不抢屏）
+- 第一期已含：`/config` 与 `/provider` 同源、office2、连接失败一句文案
+
 ## 2.0 — 2026-09-09
 
 第 13 次增量之后的首个功能完整版本。

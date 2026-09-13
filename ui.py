@@ -8,10 +8,11 @@ import time
 import sys
 import threading
 import unicodedata
+import shutil
 
 
 W = 58  # 框线宽度
-APP_VERSION = "2.0"  # 产品版本；plan13 为第 13 次增量，此为功能完整快照
+APP_VERSION = "3.0"  # 产品版本；会话树 + 当前块差分渲染
 
 # ---------------------------------------------------------------------------
 # 环境变量（v3.0）
@@ -299,6 +300,35 @@ def _disp_width(s):
     return w
 
 
+def wrap_display_lines(text, width):
+    """按显示宽度折行，保留原文换行。"""
+    width = max(int(width), 4)
+    lines = []
+    for para in (text or "").split("\n"):
+        if para == "":
+            lines.append("")
+            continue
+        cur = ""
+        for ch in para:
+            if _disp_width(cur + ch) > width:
+                lines.append(cur)
+                cur = ch
+            else:
+                cur += ch
+        if cur:
+            lines.append(cur)
+    return lines or [""]
+
+
+def diff_line_index(old_lines, new_lines):
+    """第一条不同行的下标；完全相同则返回 len(new_lines)。"""
+    i = 0
+    n = min(len(old_lines), len(new_lines))
+    while i < n and old_lines[i] == new_lines[i]:
+        i += 1
+    return i
+
+
 class Spinner:
     """
     工具执行时的进度指示器。超过 delay 秒后才开始显示旋转动画。
@@ -406,6 +436,45 @@ class StreamDisplay:
         self._in_reasoning = False
         self._in_text = False
         self._text_buf = ""
+        self._phase_prefix = ""
+        self._phase_text = ""
+        self._phase_lines = []
+        self._diff = _VT_ERASE
+
+    def _end_phase(self):
+        """结束当前块，已打印内容留在滚动区。"""
+        self._phase_prefix = ""
+        self._phase_text = ""
+        self._phase_lines = []
+
+    def _begin_phase(self, prefix):
+        self._phase_prefix = prefix
+        self._phase_text = ""
+        self._phase_lines = []
+        if not self._diff:
+            print(prefix, end="", flush=True)
+
+    def _feed(self, content, paint=False):
+        if not self._diff or Spinner._active is not None:
+            if paint and _USE_COLOR:
+                print(f"{C_ITALIC}{C_GRAY}{content}{C_RESET}", end="", flush=True)
+            else:
+                print(content, end="", flush=True)
+            self._phase_text += content
+            return
+        self._phase_text += content
+        raw = self._phase_prefix + self._phase_text
+        width = shutil.get_terminal_size((80, 24)).columns - 1
+        new_lines = wrap_display_lines(raw, width)
+        start = diff_line_index(self._phase_lines, new_lines)
+        up = len(self._phase_lines) - start
+        if self._phase_lines and up > 0:
+            sys.stdout.write(f"\033[{up}A")
+        for line in new_lines[start:]:
+            body = f"{C_ITALIC}{C_GRAY}{line}{C_RESET}" if paint and _USE_COLOR else line
+            sys.stdout.write("\r" + body + "\033[K\n")
+        self._phase_lines = new_lines
+        sys.stdout.flush()
 
     def handle(self, chunk):
         ctype = chunk["type"]
@@ -415,37 +484,36 @@ class StreamDisplay:
                 if not self._in_reasoning:
                     self._in_reasoning = True
                     turn_sep("thinking")
-                    print(f"  {ICO_THINK} ", end="", flush=True)
-                # v3.0: 斜体 + 灰色
-                content = chunk["content"]
-                if _USE_COLOR:
-                    print(f"{C_ITALIC}{C_GRAY}{content}{C_RESET}", end="", flush=True)
-                else:
-                    print(content, end="", flush=True)
+                    self._begin_phase(f"  {ICO_THINK} ")
+                self._feed(chunk["content"], paint=True)
 
         elif ctype == "text":
             if not self._in_text:
                 if self._in_reasoning:
-                    print()  # reasoning 结束换行
+                    if not self._diff:
+                        print()
+                    self._end_phase()
                     self._in_reasoning = False
                 self._in_text = True
                 turn_sep("ai")
-                print(f"  {ICO_AI} ", end="", flush=True)
-            print(chunk["content"], end="", flush=True)
+                self._begin_phase(f"  {ICO_AI} ")
+            self._feed(chunk["content"])
             self._text_buf += chunk["content"]
 
         elif ctype == "tool_call":
-            if self._in_reasoning:
-                print()
+            if self._in_reasoning or self._in_text:
+                if not self._diff:
+                    print()
+                self._end_phase()
                 self._in_reasoning = False
-            if self._in_text:
-                print()
                 self._in_text = False
             self._print_tool_call(chunk)
 
         elif ctype == "error":
             if self._in_reasoning or self._in_text:
-                print()
+                if not self._diff:
+                    print()
+                self._end_phase()
                 self._in_reasoning = False
                 self._in_text = False
             err_icon = _color(ICO_ERR, C_RED)
@@ -453,7 +521,9 @@ class StreamDisplay:
 
     def finish(self):
         if self._in_reasoning or self._in_text:
-            print()
+            if not self._diff:
+                print()
+            self._end_phase()
             self._in_reasoning = False
             self._in_text = False
         return self._text_buf.strip()
@@ -661,7 +731,9 @@ def print_help():
     print("     /resume [id]         — 恢复会话")
     print("     /save                — 保存当前会话")
     print("     /status              — token / SAFE_MODE / 上下文")
-    print("     /history             — 消息历史")
+    print("     /history             — 当前路径最近消息")
+    print("     /tree                — 会话树")
+    print("     /fork [id]           — 把叶设到某条消息，下一句分叉")
     print("     /config              — 当前配置")
     print("     /provider [name]     — 切换 provider")
     print("     /model [deepseek|qwen|office2] [low|medium|xhigh] — 切换模型 / 思考强度")

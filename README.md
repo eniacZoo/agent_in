@@ -1,8 +1,8 @@
-# agent_in 2.0
+# agent_in 3.0
 
 极简 CLI Agent。7 个工具：`read_file`、`write_file`、`edit_file`、`shell`、`view_image`、`glob`、`grep`。
 
-当前产品版本 **2.0**（第 13 次增量后的功能完整快照）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
+当前产品版本 **3.0**（会话树 + 当前 thinking/ai 块差分渲染）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
 
 技能是文件，不是新 function。模型默认看不见 `/use`。
 

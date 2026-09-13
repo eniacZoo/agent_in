@@ -45,7 +45,8 @@ def _c(text, color):
 class CliState:
     """交互会话可变状态。handler 直接改字段。"""
 
-    def __init__(self, work_dir, model, sid, messages, total_prompt, total_completion, turn, tracker):
+    def __init__(self, work_dir, model, sid, messages, total_prompt, total_completion, turn, tracker,
+                 leaf_id=None):
         self.work_dir = work_dir
         self.model = model
         self.sid = sid
@@ -55,6 +56,7 @@ class CliState:
         self.turn = turn
         self.tracker = tracker
         self.quit = False
+        self.leaf_id = leaf_id
 
 
 def handle(prompt, state):
@@ -101,6 +103,7 @@ def handle(prompt, state):
 def _cmd_new(state, _arg):
     state.sid = uuid.uuid4().hex[:8]
     state.messages = []
+    state.leaf_id = None
     state.total_prompt = 0
     state.total_completion = 0
     state.turn = 0
@@ -130,9 +133,11 @@ def _cmd_resume(state, arg):
         if data:
             state.messages = data["messages"]
             meta = data["meta"]
+            state.leaf_id = meta.get("leaf_id")
             state.total_prompt = meta.get("total_prompt", 0)
             state.total_completion = meta.get("total_completion", 0)
-            state.turn = len([m for m in state.messages if m.get("role") == "user"])
+            path = session.path_to_leaf(state.messages, state.leaf_id)
+            state.turn = len([m for m in path if m.get("role") == "user"])
             state.sid = target
             state.tracker = usage.Tracker(state.sid)
             print(f"  {_c(f'{ui.ICO_OK} 已恢复会话 {target}（{len(state.messages)} 条消息）', _C_GREEN)}")
@@ -160,6 +165,7 @@ def _cmd_save(state, _arg):
             "work_dir": state.work_dir,
             "total_prompt": state.total_prompt,
             "total_completion": state.total_completion,
+            "leaf_id": state.leaf_id,
         })
         print(f"  {_c(f'{ui.ICO_OK} 已保存会话 {state.sid} → {p.name}', _C_GREEN)}")
     except Exception as e:
@@ -198,9 +204,36 @@ def _cmd_status(state, _arg):
         print(f"   上次 TTFB: {ttfb}ms")
 
 
+def _cmd_tree(state, _arg):
+    if not state.messages:
+        print("  (空会话)")
+        return
+    print()
+    print(f"   当前叶: {_c(state.leaf_id or '-', _C_GREEN)}")
+    for line in session.format_tree(state.messages, state.leaf_id):
+        print(line)
+    print()
+
+
+def _cmd_fork(state, arg):
+    key = (arg or "").strip()
+    if not key:
+        print(f"  {_c(ui.ICO_FAIL + ' 用法: /fork <id>', _C_RED)}")
+        return
+    node = session.find_node(state.messages, key)
+    if not node:
+        print(f"  {_c(f'{ui.ICO_FAIL} 找不到节点 {key}', _C_RED)}")
+        return
+    state.leaf_id = node.get("id")
+    path = session.path_to_leaf(state.messages, state.leaf_id)
+    state.turn = len([m for m in path if m.get("role") == "user"])
+    print(f"  {_c(f'{ui.ICO_OK} 已将叶设为 {state.leaf_id}，下一句将从此分叉', _C_GREEN)}")
+
+
 def _cmd_history(state, _arg):
-    print(f"  [{len(state.messages)} messages in history]")
-    for m in state.messages[-6:]:
+    path = session.path_to_leaf(state.messages, state.leaf_id)
+    print(f"  [{len(path)} messages on current path]")
+    for m in path[-6:]:
         role = m["role"]
         content = m.get("content", "") or ""
         if role == "tool":
@@ -516,6 +549,8 @@ _COMMANDS = {
     "/save": _cmd_save,
     "/status": _cmd_status,
     "/history": _cmd_history,
+    "/tree": _cmd_tree,
+    "/fork": _cmd_fork,
     "/help": _cmd_help,
     "/config": _cmd_config,
     "/provider": _cmd_provider,
