@@ -92,7 +92,7 @@ class Plan10UiTests(unittest.TestCase):
                 context_limit=128000, capability={"tool_call": True, "vision": False},
             )
         out = buf.getvalue()
-        self.assertIn("v3.0", out)
+        self.assertIn("v3.1", out)
         self.assertIn(ui.APP_VERSION, out)
         self.assertIn("128.0K", out)
         self.assertNotIn("196K, text", out)

@@ -164,6 +164,11 @@ def execute_skill(name, params, session_id=None, confirm_fn=None, input_fn=None)
     vendor = str(VENDOR_DIR)
     old_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = vendor + os.pathsep + old_pp if old_pp else vendor
+    try:
+        import tools as _tools
+        _tools._apply_vendor_python_path(env)
+    except Exception:
+        pass
 
     t0 = time.time()
     try:
@@ -277,8 +282,14 @@ def _skill_security_gate(name, entry_path, session_id, confirm_fn, input_fn):
 
 
 def _find_python():
-    """找可用的 python。"""
-    # 优先当前解释器
+    """找可用的 python。优先能加载 vendor 的 3.11。"""
+    try:
+        import tools as _tools
+        py = _tools._vendor_python()
+        if py:
+            return py
+    except Exception:
+        pass
     current = sys.executable
     if current and os.path.exists(current):
         return current

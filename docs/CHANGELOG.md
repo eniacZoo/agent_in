@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.1 — 2026-10-03
+
+上下文改为只追加，长任务按进展停，并补上离线建站所需的工具和依赖。
+
+- 截断或 JSON 不完整的工具调用不执行；会话记录 `finish_reason` 与缓存命中
+- 按 provider 分预算：Qwen 128K / 32K / 200 轮，DeepSeek 196K / 16K / 300 轮；压缩改为结构化摘要
+- 新工具：`python`、`job`、`todo_write`、`ask_user`；`shell` 超时转后台；`edit_file` 默认唯一匹配；`write_file` 可 append
+- 任务文件隔离在 `temp/tasks/<session_id>/`；`/continue` 交接后续做，`/clean` 清理过期临时文件
+- vendor 增加 FastAPI 栈（cp311）和免构建的 Vue 3 / ECharts；技能覆盖拆分入库、数据管理系统脚手架、Edge 验收
+- shell 拒绝结束本进程、父进程，或按名字结束全部 python
+- 同批验收：3.11 解释器解析与 30 轮刹车（plan24）、产出以文件变化为准（plan25）、确认空回车再问（plan26）
+
 ## 3.0 — 2026-09-13
 
 会话树与当前流式块差分渲染。

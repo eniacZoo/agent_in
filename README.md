@@ -1,8 +1,8 @@
-# agent_in 3.0
+# agent_in 3.1
 
-极简 CLI Agent。7 个工具：`read_file`、`write_file`、`edit_file`、`shell`、`view_image`、`glob`、`grep`。
+极简 CLI Agent。11 个工具：`read_file`、`write_file`、`edit_file`、`shell`、`python`、`job`、`todo_write`、`ask_user`、`view_image`、`glob`、`grep`。
 
-当前产品版本 **3.0**（会话树 + 当前 thinking/ai 块差分渲染）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
+当前产品版本 **3.1**（只追加上下文、按进展停机、离线建站工具）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
 
 技能是文件，不是新 function。模型默认看不见 `/use`。
 
@@ -30,7 +30,7 @@ python agent.py -V
 
 `/ls skills` 列出两类。不要对模型注册 `skill_*`。
 
-`vendor/` 办公套件：openpyxl、python-docx、python-pptx、pypdf、pandas、Playwright（合计约 208MB）。脚本 skill 运行时自动加 `PYTHONPATH`。Playwright **不含** Chromium，要控浏览器需另装。详见 `vendor/README.md`。
+`vendor/` 办公套件：openpyxl、python-docx、python-pptx、pypdf、pandas、Playwright，以及 FastAPI / uvicorn / pydantic（cp311）。前端单文件在 `vendor/web/`（Vue 3、ECharts），不经 npm。脚本 skill 运行时自动加 `PYTHONPATH`。Playwright **不含** Chromium；验收页面用系统 Edge（`channel="msedge"`）。详见 `vendor/README.md`。
 
 ## 文档与测试
 
@@ -43,6 +43,6 @@ python agent.py -V
 跑某一阶段的验收（在仓库根目录）：
 
 ```text
-python tests/_test_plan22.py
+python tests/_test_plan27.py
 python -m unittest discover -s tests -p "_test_plan*.py"
 ```

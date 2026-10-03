@@ -29,6 +29,7 @@ import skill_manager
 import loop
 import heartbeat
 import debug
+import taskdir
 
 
 _C_GRAY = ui.C_GRAY
@@ -77,8 +78,15 @@ def handle(prompt, state):
     arg = parts[1] if len(parts) > 1 else ""
 
     if cmd in ("/quit", "/exit", "/q"):
+        n = tools.kill_all_jobs()
+        if n:
+            print(f"  {_c('已停止 ' + str(n) + ' 个后台任务', _C_GRAY)}")
         state.quit = True
         return True
+
+    if cmd == "/continue":
+        # 不拦截。交接摘要已在上下文里，原句交给模型接着做。
+        return False
 
     if cmd == "/ls" and arg == "skills":
         _cmd_ls_skills(state)
@@ -193,7 +201,12 @@ def _cmd_status(state, _arg):
     used = loop.LAST_PROMPT_TOKENS
     pct = used / limit * 100
     print(f"   上下文: {pct:.0f}% ({ui.fmt_tokens(used)}/{ui.fmt_tokens(limit)})")
-    print(f"   本轮工具轮次: {loop.LAST_TOOL_ROUNDS}")
+    print(f"   本轮工具轮次: {loop.LAST_TOOL_ROUNDS} / 上限 {loop.MAX_TOOL_ITERATIONS}")
+    tel = loop.LAST_TELEMETRY
+    if tel is not None:
+        for line in tel.summary_lines():
+            print(f"   {line}")
+    print(f"   task_temp: {tools.task_temp(create=False)}")
     print(f"   连接: {'yes' if getattr(llm, 'CONNECTED', False) else 'DISCONNECTED'}")
     hb = heartbeat.LAST or {}
     if hb:
@@ -293,6 +306,7 @@ def _switch_to_provider(state, target):
         logger.info("heartbeat_ok", hb)
     else:
         logger.warn("heartbeat_fail", hb)
+    loop.apply_profile(target)
     ok, msg, cap = llm.check_connection(model=active_p.get("model"))
     if ok:
         loop.apply_capability(cap)
@@ -541,6 +555,24 @@ def _cmd_logs(_state, arg):
         print(f"  {_c(ts, color)}  {_c(level, color):<5}  {event}  {data_str}")
 
 
+def _cmd_clean(state, arg):
+    """清理过期临时目录。/clean 按保留天数；/clean now 立刻清掉除当前会话外的全部；/clean list 只列出。"""
+    flag = (arg or "").strip().lower()
+    ttl = 0 if flag == "now" else float(config.get("task_temp_ttl_days", 7) or 7)
+    dry = flag in ("list", "ls")
+    res = taskdir.sweep(state.work_dir, ttl_days=ttl, protect=(state.sid,), dry_run=dry or flag == "list")
+    n_cur, freed_cur = (0, 0)
+    if flag == "now":
+        n_cur, freed_cur = taskdir.clean_task(state.work_dir, state.sid)
+    verb = "可清理" if dry else "已清理"
+    print(f"  {_c(verb, _C_GREEN)} 任务目录 {res['task_dirs']} 个，旧临时文件 {res['legacy']} 个，"
+          f"{taskdir.fmt_bytes(res['bytes'] + freed_cur)}")
+    if n_cur:
+        print(f"  当前会话临时文件 {n_cur} 项（plan.md / todo.json / task_notes.md 保留）")
+    for p in res["items"][:20]:
+        print(f"    {p}")
+
+
 # 首词 → handler(state, arg)。/ls /memory /logs /quit 在 handle() 里特判。
 _COMMANDS = {
     "/new": _cmd_new,
@@ -560,4 +592,5 @@ _COMMANDS = {
     "/del": _cmd_del,
     "/read-skill": _cmd_read_skill,
     "/debug": _cmd_debug,
+    "/clean": _cmd_clean,
 }

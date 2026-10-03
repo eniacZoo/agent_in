@@ -44,6 +44,7 @@ def log_security(
     rule_id,
     findings,
     pid=None,
+    answer=None,
 ):
     """
     写入一条安全审计记录（append-only）。
@@ -76,6 +77,8 @@ def log_security(
         "findings": findings,
         "pid": pid,
     }
+    if answer is not None:
+        record["answer"] = answer[:80]
     line = json.dumps(record, ensure_ascii=False)
     try:
         with _lock:

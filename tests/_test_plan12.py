@@ -77,7 +77,8 @@ class Plan12Tests(unittest.TestCase):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
+             "python", "job", "todo_write", "ask_user"],
         )
 
 

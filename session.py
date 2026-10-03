@@ -25,8 +25,24 @@ _SESSIONS_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "sessions"
 _lock = threading.Lock()
 
 
+# save() 时调用方没带这些 meta 键就沿用磁盘上的旧值（harness 中途写入，回合末的 save 不应冲掉）
+PRESERVE_KEYS = ("telemetry", "task")
+
+
 def _ensure_dir():
     _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_meta(session_id: str) -> dict:
+    """只读 meta（不校验消息）。不存在/损坏返回 {}。"""
+    p = _path(session_id)
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return {k: v for k, v in raw.items() if k not in ("messages",)}
 
 
 def _path(session_id: str) -> Path:
@@ -191,12 +207,14 @@ def save(session_id: str, messages: list, meta: dict | None = None) -> Path:
     created = now
     old_messages = []
     old_leaf = None
+    old_extra = {}
     if p.exists():
         try:
             old = json.loads(p.read_text(encoding="utf-8"))
             created = old.get("created", now)
             old_messages = old.get("messages") or []
             old_leaf = old.get("leaf_id")
+            old_extra = {k: old[k] for k in PRESERVE_KEYS if k in old}
         except Exception:
             pass
 
@@ -213,6 +231,7 @@ def save(session_id: str, messages: list, meta: dict | None = None) -> Path:
         "leaf_id": leaf_id,
         "messages": merged,
     }
+    data.update(old_extra)  # 遥测/任务状态等：调用方没传就沿用旧值
     if meta:
         data.update({k: v for k, v in meta.items() if k != "leaf_id"})
         data["leaf_id"] = leaf_id

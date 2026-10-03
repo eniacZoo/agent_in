@@ -12,6 +12,7 @@ agent.py — CLI 入口（对应 PI 的 coding-agent）
 """
 import argparse
 import os
+import subprocess
 import sys
 import uuid
 
@@ -29,6 +30,7 @@ import usage
 import loop
 import commands
 import heartbeat
+import taskdir
 
 
 _C_GRAY = ui.C_GRAY
@@ -57,6 +59,21 @@ def _encode_image_paths(image_paths, work_dir):
         except (FileNotFoundError, ValueError) as e:
             print(f"  {_c(ui.ICO_FAIL + ' ' + str(e), _C_RED)}")
     return urls
+
+
+def _sweep_temp(work_dir, protect_sid):
+    """启动时清掉过期的任务目录和旧版 temp 平铺文件。当前要恢复的会话不动。"""
+    try:
+        res = taskdir.sweep(
+            work_dir,
+            ttl_days=float(config.get("task_temp_ttl_days", 7) or 7),
+            protect=[protect_sid] if protect_sid else [],
+        )
+    except Exception:
+        return
+    n = res["task_dirs"] + res["legacy"]
+    if n:
+        print(f"  {_c('已清理过期临时文件 ' + str(n) + ' 项，释放 ' + taskdir.fmt_bytes(res['bytes']), _C_GRAY)}")
 
 
 def _load_resume(resume, session_id):
@@ -97,6 +114,7 @@ def run_single(prompt, work_dir, model=None, image_paths=None, resume=None, sess
     loop.reset_context_warnings()
 
     sid, messages, total_prompt_prev, total_completion_prev, leaf_id = _load_resume(resume, session_id)
+    _sweep_temp(work_dir, sid)
     initial_images = _encode_image_paths(image_paths or [], work_dir)
 
     logger.info("session_start", {"session_id": sid, "model": model or llm.MODEL, "resumed": bool(resume)})
@@ -221,6 +239,7 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
                     thinking=config.get("reasoning_effort", "low"))
 
     sid, messages, total_prompt, total_completion, leaf_id = _load_resume(resume, session_id)
+    _sweep_temp(work_dir, sid)
     path0 = session.path_to_leaf(messages, leaf_id)
     turn = len([m for m in path0 if m.get("role") == "user"]) if path0 else 0
     loop.reset_context_warnings()
@@ -323,8 +342,36 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
     print("  bye\n")
 
 
+def _maybe_reexec_vendor_python():
+    """办公机默认 3.14 时，切到能加载 vendor 原生扩展的 3.11。AGENT_NO_REEXEC=1 跳过。"""
+    if os.environ.get("AGENT_NO_REEXEC") == "1":
+        return
+    if sys.version_info[:2] == (3, 11):
+        return
+    exe = tools._vendor_python()
+    if not exe:
+        return
+    if os.path.normcase(os.path.abspath(exe)) == os.path.normcase(os.path.abspath(sys.executable)):
+        return
+    argv = [exe] + sys.argv
+    if sys.platform == "win32":
+        # Windows 的 execv 会另起进程后立刻退出，PowerShell 先回到提示符，横幅再写进去。
+        try:
+            rc = subprocess.call(argv)
+        except OSError:
+            return
+        except KeyboardInterrupt:
+            sys.exit(130)
+        sys.exit(rc)
+    try:
+        os.execv(exe, argv)
+    except OSError:
+        return
+
+
 def main():
     """解析 CLI，接线 config → providers → WORK_DIR/SAFE_MODE，再进单次或交互。"""
+    _maybe_reexec_vendor_python()
     parser = argparse.ArgumentParser(
         description="agent_in {} — Minimal CLI Agent".format(ui.APP_VERSION),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -379,6 +426,7 @@ Examples:
     active_p = providers.get_active(active_name)
     providers.apply_to_llm(active_p)
     providers.set_active_name(active_name)
+    loop.apply_profile(active_name)
 
     work_dir = os.path.abspath(args.work_dir)
     if args.model:

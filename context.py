@@ -96,11 +96,16 @@ def trim_tool_results(messages: list, keep_last: int = 1) -> tuple:
     return new_messages, saved_chars
 
 
+def _omit_arg_stub(n, path):
+    """超长写入参数整段换成元数据，不留任何可被照抄进文件的正文。"""
+    return {"_omitted": True, "chars": n, "path": path}
+
+
 def trim_tool_call_args(messages: list, keep_last: int = 2) -> tuple:
     """
     对较旧的 assistant.tool_calls 参数瘦身：
     write_file.content / edit_file.old_text / edit_file.new_text
-    只留前 TOOLCALL_ARG_KEEP_CHARS 字符 + 长度提示。
+    超长时整段换成路径短记。
 
     最近 keep_last 条带 tool_calls 的 assistant 消息不动。
     返回 (new_messages, saved_chars)
@@ -132,8 +137,7 @@ def trim_tool_call_args(messages: list, keep_last: int = 2) -> tuple:
             for k in BIG_KEYS:
                 v = args.get(k)
                 if isinstance(v, str) and len(v) > TOOLCALL_ARG_KEEP_CHARS:
-                    args[k] = v[:TOOLCALL_ARG_KEEP_CHARS] + \
-                        f"…(trimmed {len(v) - TOOLCALL_ARG_KEEP_CHARS} chars，需要时 read_file 重取)"
+                    args[k] = _omit_arg_stub(len(v), args.get("path") or "")
                     hit = True
             if not hit:
                 tcs.append(tc)
@@ -437,3 +441,250 @@ def _do_summarize(messages: list, llm_chat_fn, recent_keep: int) -> tuple:
     new_messages.extend(recent)
 
     return new_messages, len(old_slice)
+
+
+# ===========================================================================
+# P1：append-only 窗口 + 结构化压缩
+#
+# 旧做法：每轮重新滑窗、裁旧工具结果 → 请求前缀每轮都变 → 前缀缓存失效，
+#        且更早的内容只剩"工具名"，模型失忆后反复重读同一文件。
+# 新做法：未到阈值时发送完整历史（前缀稳定，缓存命中）；到阈值才做一次低频的
+#        "结构化压缩"，把压缩结果作为 marker 消息追加进轨迹（可存盘、可恢复）。
+# ===========================================================================
+COMPACT_MARK = "context_compaction"   # marker 消息的 name
+COMPACT_SUMMARY_MAX = 7000            # 摘要正文上限（字符）
+COMPACT_INPUT_MAX = 60000             # 喂给摘要模型的历史文本上限（字符）
+
+estimate_tokens = _estimate_tokens
+
+
+COMPACT_PROMPT = """你在为一个命令行 agent 压缩对话历史。请输出"交接摘要"：另一个模型只看这份摘要加最近的消息，就能无缝接着干活，不用重读文件、不用重做已完成的事。
+
+要求：
+- 具体：保留路径、函数名、表名/字段名、列映射、数值、命令、端口、错误信息原文，不要写空话。
+- 区分"已验证的事实"和"猜测"。
+- 不要输出文件清单（系统会自动补）。
+- 总长度不超过 {max_chars} 字。
+
+按下列栏目输出（没有内容写"无"）：
+## 目标
+## 约束与用户已确认的决定
+## 已完成
+## 关键发现与踩过的坑
+## 当前状态
+## 下一步
+## 后续还要用到的关键事实（接口约定、表结构、列映射、解析规则等）"""
+
+
+def is_compaction(m) -> bool:
+    return isinstance(m, dict) and m.get("name") == COMPACT_MARK
+
+
+def _last_marker(transcript):
+    """返回 (index, marker) 或 (-1, None)。marker 必须有 covers_until 且被覆盖的消息在轨迹里。"""
+    ids = {m.get("id"): i for i, m in enumerate(transcript) if m.get("id")}
+    for i in range(len(transcript) - 1, -1, -1):
+        m = transcript[i]
+        if is_compaction(m) and m.get("covers_until") in ids:
+            return i, m
+    return -1, None
+
+
+def live_slice(transcript):
+    """返回 (marker_or_None, live_messages)：marker 之后尚未被压缩的消息（不含 marker 本身）。"""
+    idx, marker = _last_marker(transcript)
+    if marker is None:
+        return None, [m for m in transcript if not is_compaction(m)]
+    ids = {m.get("id"): i for i, m in enumerate(transcript) if m.get("id")}
+    cut = ids[marker["covers_until"]]
+    live = [m for j, m in enumerate(transcript) if j > cut and not is_compaction(m)]
+    return marker, live
+
+
+def derive_window(transcript, system_content):
+    """append-only 窗口：[system] (+ 压缩摘要) + 其后的全部消息。不修改 transcript。"""
+    marker, live = live_slice(transcript)
+    window = [{"role": "system", "content": system_content}]
+    if marker is not None:
+        window.append({
+            "role": "user",
+            "name": "context_summary",
+            "content": "【此前对话的交接摘要】\n" + (marker.get("content") or ""),
+        })
+    window.extend(dict(m) for m in live)
+    return window
+
+
+def _tool_call_brief(tc):
+    fn = tc.get("function") or {}
+    name = fn.get("name") or ""
+    try:
+        a = json.loads(fn.get("arguments") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        a = {}
+    if not isinstance(a, dict):
+        a = {}
+    if name in ("read_file", "write_file", "edit_file"):
+        extra = ""
+        if name == "read_file" and (a.get("start_line") or a.get("end_line")):
+            extra = f" [{a.get('start_line', 1)}-{a.get('end_line', '')}]"
+        return f"{name} {a.get('path', '')}{extra}"
+    if name in ("shell", "python"):
+        body = a.get("command") or a.get("code") or ""
+        return f"{name} {str(body).strip().replace(chr(10), ' ; ')[:160]}"
+    if name in ("glob", "grep"):
+        return f"{name} {a.get('pattern', '')}"
+    return f"{name} {str(a)[:80]}"
+
+
+def collect_files(msgs, files=None):
+    """从工具调用里程序化统计读过/改过的文件。返回 {"read": [...], "written": [...]}。"""
+    files = files or {"read": [], "written": []}
+    for m in msgs:
+        if m.get("role") != "assistant":
+            continue
+        for tc in (m.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            name = fn.get("name")
+            try:
+                a = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            p = a.get("path") if isinstance(a, dict) else None
+            if not p:
+                continue
+            key = "read" if name == "read_file" else ("written" if name in ("write_file", "edit_file") else None)
+            if key and p not in files[key]:
+                files[key].append(p)
+    for k in files:
+        files[k] = files[k][-40:]
+    return files
+
+
+def format_files(files):
+    r = ", ".join(files.get("read") or []) or "无"
+    w = ", ".join(files.get("written") or []) or "无"
+    return f"## 文件清单（程序统计）\n读过: {r}\n写/改过: {w}"
+
+
+def _render_for_summary(prev_summary, old_slice):
+    """把待压缩的历史渲染成文本，供摘要模型阅读。每条限长，总量封顶。"""
+    out = []
+    if prev_summary:
+        out.append("【更早的摘要（请并入新摘要，勿丢信息）】\n" + prev_summary[:COMPACT_SUMMARY_MAX])
+    for m in old_slice:
+        role = m.get("role")
+        c = m.get("content")
+        if isinstance(c, list):
+            c = "[多模态内容]"
+        c = c if isinstance(c, str) else ""
+        if role == "user":
+            out.append("用户: " + c[:1500])
+        elif role == "assistant":
+            if c.strip():
+                out.append("助手: " + c.strip()[:700])
+            for tc in (m.get("tool_calls") or []):
+                out.append("  调用: " + _tool_call_brief(tc))
+        elif role == "tool":
+            out.append("  结果: " + c.strip().replace("\n", " ")[:350])
+    text = "\n".join(out)
+    if len(text) > COMPACT_INPUT_MAX:
+        head = text[: COMPACT_INPUT_MAX // 3]
+        tail = text[-(COMPACT_INPUT_MAX * 2 // 3):]
+        text = head + "\n…（中间部分略）…\n" + tail
+    return text
+
+
+def fallback_summary(prev_summary, old_slice):
+    """摘要模型不可用时的程序化兜底：用户目标 + 最近动作，比"只有工具名"强得多。"""
+    users = [m for m in old_slice if m.get("role") == "user"
+             and isinstance(m.get("content"), str) and m.get("name") not in (COMPACT_MARK, "context_summary")]
+    lines = []
+    if prev_summary:
+        lines.append(prev_summary[:3000])
+    lines.append("## 用户消息（原文节选）")
+    for m in users[-8:]:
+        lines.append("- " + m["content"].strip().replace("\n", " ")[:300])
+    acts = []
+    for m in old_slice:
+        if m.get("role") == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                acts.append(_tool_call_brief(tc))
+    lines.append("## 最近的动作（摘要模型不可用，仅列调用）")
+    for a in acts[-40:]:
+        lines.append("- " + a)
+    text = "\n".join(lines)
+    return text[:COMPACT_SUMMARY_MAX]
+
+
+def summarize_structured(prev_summary, old_slice, llm_chat_fn):
+    """调摘要模型生成结构化摘要。失败返回 ''。"""
+    if not llm_chat_fn or not old_slice:
+        return ""
+    msgs = [
+        {"role": "system", "content": COMPACT_PROMPT.format(max_chars=COMPACT_SUMMARY_MAX - 1000)},
+        {"role": "user", "content": _render_for_summary(prev_summary, old_slice)},
+    ]
+    try:
+        parts = []
+        for chunk in llm_chat_fn(msgs, max_tokens=4000, think=False):
+            t = chunk.get("type")
+            if t == "text":
+                parts.append(chunk["content"])
+            elif t == "error":
+                return ""
+        text = "".join(parts).strip()
+    except Exception:
+        return ""
+    return text[:COMPACT_SUMMARY_MAX - 800] if text else ""
+
+
+def compact(transcript, llm_chat_fn, keep_recent_tokens):
+    """
+    对 transcript 做一次压缩。成功返回 (marker_message, info)，无可压缩内容返回 (None, None)。
+    marker 需由调用方 append 进 transcript。保留最近约 keep_recent_tokens 的原文单位。
+    """
+    prev, live = live_slice(transcript)
+    if len(live) < 4:
+        return None, None
+    kept_from = len(live)
+    tokens = 0
+    i = len(live) - 1
+    while i >= 0:
+        start = _unit_start(live, i)
+        t = _estimate_tokens(live[start:i + 1])
+        if kept_from < len(live) and tokens + t > keep_recent_tokens:
+            break
+        tokens += t
+        kept_from = start
+        i = start - 1
+    # 保证最近一条真实用户消息（当前任务）留在原文里
+    last_user = max((j for j, m in enumerate(live)
+                     if m.get("role") == "user" and m.get("name") not in (COMPACT_MARK, "context_summary")),
+                    default=None)
+    if last_user is not None and kept_from > last_user:
+        kept_from = last_user
+    if kept_from < 2:
+        return None, None
+    old = live[:kept_from]
+    tail = old[-1]
+    if not tail.get("id"):
+        return None, None
+    before = _estimate_tokens(live) + (_estimate_tokens([{"content": prev.get("content")}]) if prev else 0)
+    prev_text = ((prev or {}).get("content") or "").split("\n\n## 文件清单")[0]
+    body = summarize_structured(prev_text, old, llm_chat_fn)
+    used_llm = bool(body)
+    if not body:
+        body = fallback_summary(prev_text, old)
+    files = collect_files(old, dict((prev or {}).get("files") or {"read": [], "written": []}))
+    files = {k: list(v) for k, v in files.items()}
+    marker = {
+        "role": "user",
+        "name": COMPACT_MARK,
+        "content": body + "\n\n" + format_files(files),
+        "covers_until": tail["id"],
+        "files": files,
+    }
+    after = _estimate_tokens(live[kept_from:]) + _estimate_tokens([marker])
+    return marker, {"before": before, "after": after, "dropped": len(old),
+                    "used_llm": used_llm, "kept_tokens": tokens}

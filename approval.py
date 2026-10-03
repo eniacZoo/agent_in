@@ -133,12 +133,14 @@ def resolve(verdict, confirm_fn, input_fn=None, ctx=None):
 
         prompt = _prompt(verdict, ctx)
         ok = confirm_fn(prompt)
+        raw = getattr(confirm_fn, "last_answer", None)
         if ok:
             audit.log_security(
                 event=event, session_id=session_id, tool=tool,
                 detail=detail, severity=severity,
                 action="confirmed", decision="yes",
                 rule_id=rule_id, findings=findings,
+                answer=raw,
             )
             return {"approved": True, "action": "confirmed", "reason": ""}
         else:
@@ -147,6 +149,7 @@ def resolve(verdict, confirm_fn, input_fn=None, ctx=None):
                 detail=detail, severity=severity,
                 action="rejected", decision="no",
                 rule_id=rule_id, findings=findings,
+                answer=raw,
             )
             return {
                 "approved": False, "action": "rejected",
@@ -172,12 +175,14 @@ def resolve(verdict, confirm_fn, input_fn=None, ctx=None):
         # 第一轮: y/N
         prompt = _prompt(verdict, ctx)
         ok = confirm_fn(prompt)
+        raw = getattr(confirm_fn, "last_answer", None)
         if not ok:
             audit.log_security(
                 event=event, session_id=session_id, tool=tool,
                 detail=detail, severity=severity,
                 action="rejected", decision="no",
                 rule_id=rule_id, findings=findings,
+                answer=raw,
             )
             return {
                 "approved": False, "action": "rejected",

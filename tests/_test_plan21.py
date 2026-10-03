@@ -161,12 +161,12 @@ class Phase2HarnessTests(unittest.TestCase):
         self.assertTrue(loop._is_tool_ok("OK: Wrote x"))
 
     def test_stall_skips_inspect_only(self):
-        self.assertFalse(loop.should_stall_stop(False, 12))
-        self.assertTrue(loop.should_stall_stop(True, 12))
-        self.assertFalse(loop.should_stall_stop(True, 11))
+        self.assertFalse(loop.should_stall_stop(False, 30))
+        self.assertTrue(loop.should_stall_stop(True, 30))
+        self.assertFalse(loop.should_stall_stop(True, 29))
 
     def test_stall_after_temp_mutate(self):
-        self.assertTrue(loop.should_stall_stop(True, 12))
+        self.assertTrue(loop.should_stall_stop(True, 30))
         self.assertTrue(loop._shell_mutates_temp(r"python E:\x\temp\b9_probe.py"))
         self.assertFalse(loop._shell_mutates_temp("Get-ChildItem $HOME"))
 
@@ -273,7 +273,8 @@ class Phase4SearchTests(unittest.TestCase):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
+             "python", "job", "todo_write", "ask_user"],
         )
 
 

@@ -20,16 +20,21 @@ from pathlib import Path
 _DEFAULTS = {
     "work_dir": "",
     "provider": "default",
-    "max_tokens": 8192,
+    # 以下 max_tokens / context_limit / max_tool_iterations 是"全局兜底"。
+    # 实际取值走 profile_for(provider)：providers.<name>.<key> > 文件里显式写的值 > 内置档位。
+    "max_tokens": 16384,
     "context_limit": 196000,
     "shell_timeout": 60,
     "log_level": "INFO",
     "safe_mode": True,
-    "max_tool_iterations": 80,
+    "max_tool_iterations": 80,  # 兜底；实际硬上限由 profile_for() 按模型给出（DeepSeek 300 / Qwen 200）
     "auto_summarize": True,
     "reasoning_effort": "low",
-    "compact_at_tokens": 40000,  # 单次请求 prompt 超过此值即加压压缩
-    "keep_recent_tokens": 20000,  # 窗口保留最近约这么多 token，更早的进摘要
+    "compact_at_tokens": 40000,  # [已弃用] 旧的加压阈值，保留键只为兼容旧 agent_config.json
+    "keep_recent_tokens": 20000,  # 兜底；压缩时实际保留量由 profile_for() 给出（默认 24000）
+    "compact_ratio": 0.75,       # 输入预算（窗口-输出预留-余量）用到这个比例就压缩
+    "keep_turn_reasoning": False,  # 当前回合内的思考链是否回传（Qwen 档默认开）
+    "task_temp_ttl_days": 7,     # temp/tasks/<id> 最后活动超过此天数自动清理
     # H 系列（v5.0）
     "max_retries": 3,           # H1: 连接阶段最大重试次数
     "retry_base_delay": 1.0,    # H1: 指数退避基准秒数
@@ -61,7 +66,7 @@ _WHITELIST = {
     "work_dir", "provider", "max_tokens", "context_limit",
     "shell_timeout", "log_level", "safe_mode", "max_tool_iterations",
     "auto_summarize", "providers", "reasoning_effort", "compact_at_tokens",
-    "keep_recent_tokens",
+    "keep_recent_tokens", "compact_ratio", "keep_turn_reasoning", "task_temp_ttl_days",
     # H 系列（v5.0）
     "max_retries", "retry_base_delay", "rate_limit",
     "capability_ttl_days", "auto_probe",
@@ -180,6 +185,83 @@ def get(key: str, default=None):
     """供各模块按需取配置值。"""
     cfg = load()
     return cfg.get(key, default)
+
+
+# ---------------------------------------------------------------------------
+# 按 provider 的预算档位（P1）
+# ---------------------------------------------------------------------------
+# Qwen（本地 vLLM，窗口 128K，xhigh 思考单轮可达 20K+，要给输出留足）
+# DeepSeek（云端，窗口大、有前缀缓存、思考短）
+_PROFILES = {
+    "qwen": {
+        "context_limit": 128000,
+        "max_tokens": 32768,
+        "max_tool_iterations": 200,
+        "compact_ratio": 0.70,
+        "keep_recent_tokens": 24000,
+        "keep_turn_reasoning": True,
+    },
+    "deepseek": {
+        "context_limit": 196000,
+        "max_tokens": 16384,
+        "max_tool_iterations": 300,
+        "compact_ratio": 0.75,
+        "keep_recent_tokens": 24000,
+        "keep_turn_reasoning": False,
+    },
+}
+_PROFILE_KEYS = (
+    "context_limit", "max_tokens", "max_tool_iterations", "compact_ratio",
+    "keep_recent_tokens", "keep_turn_reasoning", "reasoning_effort",
+)
+# 老版本 /config 会把当时的默认值整体落盘到 agent_config.json。
+# 这些值等于"用户没设置过"，不能压住新档位。
+_LEGACY_DEFAULTS = {
+    "max_tokens": 8192,
+    "max_tool_iterations": 80,
+    "keep_recent_tokens": 20000,
+}
+# 窗口里留给"摘要请求/协议开销/估算误差"的余量
+OUTPUT_MARGIN_TOKENS = 4096
+
+
+def profile_kind(name) -> str:
+    """office* 是本地 Qwen；其余按 DeepSeek 云端档。"""
+    return "qwen" if str(name or "").lower().startswith("office") else "deepseek"
+
+
+def profile_for(name=None) -> dict:
+    """返回某 provider 的预算档位 dict（context_limit / max_tokens / max_tool_iterations /
+    compact_ratio / keep_recent_tokens / keep_turn_reasoning / reasoning_effort）。
+
+    优先级：providers.<name>.<key> > agent_config.json 顶层显式值（非遗留默认） > 内置档位。
+    """
+    prof = dict(_PROFILES[profile_kind(name)])
+    cfg = load()
+    prof["reasoning_effort"] = cfg.get("reasoning_effort", "low")
+    explicit = _read_file()
+    for k in _PROFILE_KEYS:
+        if k in explicit and explicit[k] != _LEGACY_DEFAULTS.get(k, object()):
+            if k == "context_limit" and explicit[k] == _DEFAULTS["context_limit"] \
+                    and profile_kind(name) == "qwen":
+                continue  # 196000 是旧全局默认，对 Qwen 档无意义
+            prof[k] = explicit[k]
+    pdict = (cfg.get("providers") or {}).get(name or "") or {}
+    if isinstance(pdict, dict):
+        for k in _PROFILE_KEYS:
+            if k in pdict:
+                prof[k] = pdict[k]
+    return prof
+
+
+def input_budget(prof: dict) -> int:
+    """输入预算 = 窗口 - 单次输出预留 - 余量。"""
+    return max(int(prof["context_limit"]) - int(prof["max_tokens"]) - OUTPUT_MARGIN_TOKENS, 4096)
+
+
+def compact_trigger(prof: dict) -> int:
+    """估算的 prompt 用到这个值就压缩。"""
+    return int(input_budget(prof) * float(prof["compact_ratio"]))
 
 
 def save(cfg: dict) -> Path:

@@ -35,26 +35,32 @@ class Plan11Tests(unittest.TestCase):
         self.assertIsInstance(out, str)
 
     def test_shell_reads_bytes_not_text(self):
+        import io
         captured = {}
 
         class Proc:
-            returncode = 0
-            stdout = b"name \xae dir"
-            stderr = b""
+            def __init__(self):
+                self.returncode = 0
+                self.pid = 4242
+                self.stdout = io.BytesIO(b"name \xae dir")
 
-        def fake_run(*_a, **kw):
+            def wait(self):
+                return 0
+
+        def fake_popen(argv, **kw):
             captured.update(kw)
             return Proc()
 
-        old = subprocess.run
-        subprocess.run = fake_run
+        old = subprocess.Popen
+        subprocess.Popen = fake_popen
         try:
             r = tools._exec_shell({"command": "dir"})
         finally:
-            subprocess.run = old
-        self.assertTrue(captured.get("capture_output"))
+            subprocess.Popen = old
         self.assertNotEqual(captured.get("text"), True)
+        self.assertIs(captured.get("stdout"), subprocess.PIPE)
         self.assertIn("$ dir", r)
+        self.assertIn("name", r)
         self.assertNotIn("Error:", r)
 
     def test_maybe_downscale_passthrough_small(self):

@@ -23,7 +23,8 @@ class Plan7GuardTests(unittest.TestCase):
         names = [t["function"]["name"] for t in tools.TOOLS]
         self.assertEqual(
             names,
-            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep"],
+            ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
+             "python", "job", "todo_write", "ask_user"],
         )
         self.assertFalse(any(n.startswith("skill_") for n in names))
 
@@ -92,7 +93,15 @@ class Plan7GuardTests(unittest.TestCase):
             {"path": "m.txt", "old_text": "aa", "new_text": "bb"},
             confirm_fn=lambda _p: False,
         )
-        self.assertIn("拒绝", r)
+        self.assertIn("Error", r)
+        with open(p, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "aa aa")
+        r2 = tools.execute(
+            "edit_file",
+            {"path": "m.txt", "old_text": "aa", "new_text": "bb", "replace_all": True},
+            confirm_fn=lambda _p: False,
+        )
+        self.assertIn("拒绝", r2)
         with open(p, encoding="utf-8") as f:
             self.assertEqual(f.read(), "aa aa")
 

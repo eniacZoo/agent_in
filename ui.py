@@ -12,7 +12,7 @@ import shutil
 
 
 W = 58  # 框线宽度
-APP_VERSION = "3.0"  # 产品版本；会话树 + 当前块差分渲染
+APP_VERSION = "3.1"  # 产品版本；只追加上下文、按进展停机、离线建站工具
 
 # ---------------------------------------------------------------------------
 # 环境变量（v3.0）
@@ -300,8 +300,12 @@ def _disp_width(s):
     return w
 
 
+def _ch_width(ch):
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
 def wrap_display_lines(text, width):
-    """按显示宽度折行，保留原文换行。"""
+    """按显示宽度折行，保留原文换行。逐字累加宽度，避免每字重扫整行。"""
     width = max(int(width), 4)
     lines = []
     for para in (text or "").split("\n"):
@@ -309,12 +313,16 @@ def wrap_display_lines(text, width):
             lines.append("")
             continue
         cur = ""
+        w = 0
         for ch in para:
-            if _disp_width(cur + ch) > width:
+            cw = _ch_width(ch)
+            if cur and w + cw > width:
                 lines.append(cur)
                 cur = ch
+                w = cw
             else:
                 cur += ch
+                w += cw
         if cur:
             lines.append(cur)
     return lines or [""]
@@ -380,6 +388,7 @@ class Spinner:
         if not self._paused.is_set():
             self._paused.set()
             self._erase_line()  # 若已开始绘制，先擦掉 spinner 行
+            time.sleep(0.12)  # 等一拍 spin 循环，避免 \r 盖住即将出现的 [y/N]
 
     def resume(self):
         self._paused.clear()
@@ -440,6 +449,7 @@ class StreamDisplay:
         self._phase_text = ""
         self._phase_lines = []
         self._diff = _VT_ERASE
+        self._wrap_width = None
 
     def _end_phase(self):
         """结束当前块，已打印内容留在滚动区。"""
@@ -463,10 +473,15 @@ class StreamDisplay:
             self._phase_text += content
             return
         self._phase_text += content
-        raw = self._phase_prefix + self._phase_text
         width = shutil.get_terminal_size((80, 24)).columns - 1
-        new_lines = wrap_display_lines(raw, width)
-        start = diff_line_index(self._phase_lines, new_lines)
+        if self._wrap_width != width or not self._phase_lines:
+            new_lines = wrap_display_lines(self._phase_prefix + self._phase_text, width)
+            start = 0 if self._wrap_width != width else diff_line_index(self._phase_lines, new_lines)
+            self._wrap_width = width
+        else:
+            tail = wrap_display_lines(self._phase_lines[-1] + content, width)
+            new_lines = self._phase_lines[:-1] + tail
+            start = len(self._phase_lines) - 1
         up = len(self._phase_lines) - start
         if self._phase_lines and up > 0:
             sys.stdout.write(f"\033[{up}A")
@@ -626,21 +641,38 @@ def _resume_spinner():
         sp.resume()
 
 
+LAST_CONFIRM_RAW = ""
+
+
 def confirm(prompt):
-    """用户确认，返回 True/False。
+    """用户确认，返回 True/False。空回车再问一次；实际输入记在 LAST_CONFIRM_RAW。
 
     输入前暂停 spinner：否则动画线程每 0.1s 用 \r 重绘当前行，
     会覆写 [y/N] 提示和用户回显（Windows PowerShell 下表现为字符
     重叠、输入"不生效"）。
     """
+    global LAST_CONFIRM_RAW
     warn_icon = _color(ICO_WARN, C_YELLOW)
     _pause_spinner()
+    raw = ""
     try:
-        answer = input("  {} {} [y/N]: ".format(warn_icon, prompt)).strip().lower()
-        return answer in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return False
+        for attempt in range(2):
+            hint = "[y/N]" if attempt == 0 else "[y/N]（空回车再问一次）"
+            try:
+                raw = input("  {} {} {}: ".format(warn_icon, prompt, hint)).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                raw = ""
+                LAST_CONFIRM_RAW = raw
+                confirm.last_answer = raw
+                return False
+            LAST_CONFIRM_RAW = raw
+            confirm.last_answer = raw
+            if raw:
+                break
+            if attempt == 0:
+                print("  空输入，请再确认一次（y 同意 / n 拒绝）")
+        return raw.lower() in ("y", "yes")
     finally:
         _resume_spinner()
 
@@ -747,6 +779,8 @@ def print_help():
     print("     /use <name> [path]   — 手动执行脚本 skill")
     print("     /del <name>          — 删除脚本 skill")
     print("     /logs [n]            — 最近日志")
+    print("     /continue            — 从交接摘要接着做被打断的任务")
+    print("     /clean [list|now]    — 清理过期临时文件（now=连当前会话的临时文件）")
     print("     /debug on|off|report — 长链路交互记录")
     print("     /paste               — 多行粘贴（单独一行 . 结束）")
     print("     /help                — 显示本帮助")

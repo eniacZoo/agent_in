@@ -39,7 +39,7 @@ import capability
 BASE_URL = os.environ.get("BASE_URL", "https://api.deepseek.com").rstrip("/")
 API_KEY = os.environ.get("API_KEY", "")
 MODEL = os.environ.get("MODEL", "deepseek-v4.1-flash-expires-on-0910")
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "8192"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "16384"))
 TIMEOUT = 600
 
 # 连接健康跟踪
@@ -74,11 +74,18 @@ def connection_fail_text(model=None):
     return f"无法连接模型：[{name}][{mid}]，请尝试使用/model、/provider命令进行切换"
 
 
-def _attach_thinking(payload):
-    """办公 Qwen / office2 带上 enable_thinking + reasoning_effort；DeepSeek 不发。"""
+def _attach_thinking(payload, think=None):
+    """办公 Qwen / office2 带上 enable_thinking + reasoning_effort；DeepSeek 不发。
+    think=False：显式关闭思考（压缩摘要等不需要推理的调用）。"""
     if not str(providers.get_active_name() or "").startswith("office"):
         return
-    effort = str(config.get("reasoning_effort", "low") or "low").lower()
+    if think is False:
+        payload["enable_thinking"] = False
+        return
+    try:
+        effort = str(config.profile_for(providers.get_active_name()).get("reasoning_effort", "low") or "low").lower()
+    except Exception:
+        effort = str(config.get("reasoning_effort", "low") or "low").lower()
     if effort not in REASONING_EFFORTS:
         effort = "low"
     payload["enable_thinking"] = True
@@ -125,14 +132,37 @@ _API_MSG_KEYS = {"role", "content", "name", "tool_calls", "tool_call_id"}
 
 
 def _sanitize_messages(messages):
-    """只保留 API 字段。本地审计字段（reasoning_content 等）不进 payload。"""
-    return [{k: v for k, v in m.items() if k in _API_MSG_KEYS} for m in messages]
+    """只保留 API 字段。本地审计字段（reasoning_content 等）不进 payload。
+    例外：消息带 _keep_reasoning=True（当前回合内的 assistant，由 loop 按 keep_turn_reasoning 标记）
+    时保留 reasoning_content 回传，让模型接着自己的思路往下走。"""
+    out = []
+    for m in messages:
+        d = {k: v for k, v in m.items() if k in _API_MSG_KEYS}
+        if m.get("_keep_reasoning") and m.get("reasoning_content"):
+            d["reasoning_content"] = m["reasoning_content"]
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # 核心接口
 # ---------------------------------------------------------------------------
-def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=None):
+def parse_tool_args(args_str):
+    """解析工具参数 JSON。返回 (args_dict, bad)。
+    bad=True 表示 JSON 不完整/非法（多半是输出撞上 max_tokens 被截断），
+    此时 args 为 {"_raw": 原文}，调用方必须拒绝执行。"""
+    if not args_str:
+        return {}, False
+    try:
+        args = json.loads(args_str)
+    except json.JSONDecodeError:
+        return {"_raw": args_str}, True
+    if not isinstance(args, dict):
+        return {"_raw": args_str}, True
+    return args, False
+
+
+def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=None, think=None):
     """
     调用 LLM，返回 generator，逐块 yield Chunk dict。
 
@@ -151,6 +181,8 @@ def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=
       model: 覆盖默认模型
       max_tokens: 覆盖默认 max_tokens
       images: base64 data URL 列表，拼接到最后一条 user message（v3.0 多模态）
+      think: False=显式关闭思考（仅对 office* provider 生效）；None=按 config
+    结束时还会 yield {"type": "finish", "reason": "stop|length|tool_calls|..."}（P0）
     """
     model = model or MODEL
     max_tokens = max_tokens or MAX_TOKENS
@@ -178,7 +210,7 @@ def chat(messages, tools=None, stream=True, model=None, max_tokens=None, images=
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
-    _attach_thinking(payload)
+    _attach_thinking(payload, think=think)
 
     req = urllib.request.Request(
         f"{BASE_URL}/chat/completions",
@@ -296,7 +328,9 @@ def _chat_non_stream(req, on_429=None):
     })
 
     choices = data.get("choices", [])
+    finish = ""
     if choices:
+        finish = choices[0].get("finish_reason") or ""
         msg = choices[0].get("message", {})
         # reasoning
         reasoning = msg.get("reasoning_content") or msg.get("thinking") or ""
@@ -309,21 +343,21 @@ def _chat_non_stream(req, on_429=None):
         # tool calls
         for tc in msg.get("tool_calls", []):
             fn = tc.get("function", {})
-            try:
-                args = json.loads(fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                args = {"_raw": fn.get("arguments", "")}
+            args, bad = parse_tool_args(fn.get("arguments", "{}"))
             yield {
                 "type": "tool_call",
                 "id": tc.get("id", ""),
                 "name": fn.get("name", ""),
                 "arguments": args,
+                "truncated": bad,
             }
 
     # usage
     if data.get("usage"):
         yield {"type": "usage", "data": data["usage"]}
 
+    if finish:
+        yield {"type": "finish", "reason": finish}
     yield {"type": "done"}
 
 
@@ -345,6 +379,7 @@ def _chat_stream(req, on_429=None):
     pending_tool_calls = {}  # index -> {"id":..., "name":..., "args_parts": []}
 
     stream_ok = True
+    finish = ""
     last_chunk_t = time.time()
     try:
         with resp:
@@ -372,6 +407,8 @@ def _chat_stream(req, on_429=None):
                 choices = obj.get("choices", [])
                 if not choices:
                     continue
+                if choices[0].get("finish_reason"):
+                    finish = choices[0]["finish_reason"]
                 delta = choices[0].get("delta", {})
 
                 # --- reasoning / thinking ---
@@ -422,17 +459,17 @@ def _chat_stream(req, on_429=None):
     for idx in sorted(pending_tool_calls.keys()):
         tc = pending_tool_calls[idx]
         args_str = "".join(tc["args_parts"])
-        try:
-            args = json.loads(args_str) if args_str else {}
-        except json.JSONDecodeError:
-            args = {"_raw": args_str}
+        args, bad = parse_tool_args(args_str)
         yield {
             "type": "tool_call",
             "id": tc["id"],
             "name": tc["name"],
             "arguments": args,
+            "truncated": bad,
         }
 
+    if finish:
+        yield {"type": "finish", "reason": finish}
     yield {"type": "done"}
 
 

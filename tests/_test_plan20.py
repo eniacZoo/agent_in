@@ -65,8 +65,11 @@ class Phase1Tests(unittest.TestCase):
         self.assertGreater(saved, 0)
         for i in range(2):
             args = json.loads(out[i]["tool_calls"][0]["function"]["arguments"])
-            self.assertLess(len(args["content"]), 5000)
-            self.assertIn("trimmed", args["content"])
+            self.assertIsInstance(args["content"], dict)
+            self.assertTrue(args["content"].get("_omitted"))
+            self.assertEqual(args["content"].get("chars"), 5000)
+            self.assertIn("temp/a.py", args["content"].get("path", ""))
+            self.assertNotIn("x" * 50, json.dumps(args["content"]))
         for i in range(2, 4):
             args = json.loads(out[i]["tool_calls"][0]["function"]["arguments"])
             self.assertEqual(len(args["content"]), 5000)
@@ -175,8 +178,10 @@ class Phase4Tests(unittest.TestCase):
 
     def test_stall_stop_in_source(self):
         src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
-        self.assertIn("rounds_since_write >= 12", src)
-        self.assertIn("连续 12 轮无文件产出", src)
+        self.assertIn("rounds_since_write >= STALL_STOP_ROUNDS", src)
+        self.assertIn("连续 {STALL_STOP_ROUNDS} 轮无文件产出", src)
+        self.assertIn("STALL_STOP_ROUNDS = 30", src)
+        self.assertIn("STALL_WARN_ROUNDS = 10", src)
 
     def test_repeat_warn_in_source(self):
         src = (Path(_ROOT) / "loop.py").read_text(encoding="utf-8")
