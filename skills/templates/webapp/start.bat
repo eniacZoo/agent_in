@@ -10,12 +10,12 @@ if "%AGENT_VENDOR%"=="" (
   exit /b 1
 )
 set PYTHONPATH=%AGENT_VENDOR%;%PYTHONPATH%
-py -3.11 -c "import fastapi, uvicorn" 1>nul 2>nul
+py -3.14 -c "import fastapi, uvicorn" 1>nul 2>nul
 if errorlevel 1 (
-  echo 当前 Python 加载不了 vendor 里的 fastapi。请用 py -3.11，并确认 AGENT_VENDOR 指向 agent_in\vendor
+  echo 当前 Python 加载不了 vendor 里的 fastapi。请用 py -3.14，并确认 AGENT_VENDOR 指向 agent_in\vendor
   exit /b 1
 )
-start "data-admin" py -3.11 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+start "data-admin" py -3.14 -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
 echo 等待 http://127.0.0.1:8000/
 ping -n 3 127.0.0.1 >nul
 start "" http://127.0.0.1:8000/

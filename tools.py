@@ -3,10 +3,9 @@
 """
 tools.py — Agent 工具定义与执行
 
-10 个工具：
-  文件/检索：read_file, write_file, edit_file, view_image, glob, grep
-  执行：shell（慢命令自动转后台）, python（内联代码，免落盘脚本）, job（后台任务）
-  协作：todo_write（任务清单）, ask_user（选择题式提问）
+文件/检索：read_file, write_file, edit_file, view_image, glob, grep
+执行：shell（慢命令自动转后台）, python（内联代码，脚本留到任务结束）, preview_page（Edge 截图）, job（后台任务）
+协作：todo_write（任务清单）, ask_user（选择题式提问）
 零依赖，跨平台（Windows / Linux / macOS）
 """
 import atexit
@@ -152,8 +151,6 @@ _MAX_COL_CAP = re.compile(
     re.I,
 )
 _ITER_ROWS_BARE = re.compile(r"iter_rows\s*\(\s*\)")
-_vendor_py_cache = None
-_vendor_py_resolved = False
 
 
 def ensure_temp_dir(work_dir=None):
@@ -364,7 +361,7 @@ BASE_TOOLS = [
         "type": "function",
         "function": {
             "name": "python",
-            "description": "Run a Python snippet directly (no script file to create, no shell quoting). Uses the bundled Python with vendor packages (openpyxl, pandas, docx, pptx...). The snippet is deleted after a successful run; on failure it is kept and its path is returned so you can fix it with edit_file. Print what you need to see; keep output small (summaries, not whole tables). Use save_as only for a script the user wants to keep.",
+            "description": "Run a Python snippet directly (no shell quoting). Uses the current interpreter with vendor packages (openpyxl, pandas, docx, pptx...). The script stays in the task temp run/ directory until this task ends; edit that file instead of writing a new one. Print what you need to see; keep output small (summaries, not whole tables). Use save_as only for a script the user wants to keep.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -379,6 +376,23 @@ BASE_TOOLS = [
                     },
                 },
                 "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "preview_page",
+            "description": "Open a local page in the system Edge browser and screenshot it at 1440x900 and 390x844. Use this after starting your own dev server. Do not write a Playwright script, do not install a browser, and do not patch Playwright. If Edge is missing or the page does not open, report the reason and stop.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "http:// or https:// URL, usually http://127.0.0.1:<port>/",
+                    },
+                },
+                "required": ["url"],
             },
         },
     },
@@ -572,6 +586,8 @@ def execute(tool_name, args, confirm_fn=None, input_fn=None, session_id=None):
             result = _exec_shell(args)
         elif tool_name == "python":
             result = _exec_python(args)
+        elif tool_name == "preview_page":
+            result = _exec_preview_page(args)
         elif tool_name == "job":
             result = _exec_job(args)
         elif tool_name == "todo_write":
@@ -1038,59 +1054,21 @@ def _vendor_dir():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
 
 
-def _reset_vendor_python_cache():
-    global _vendor_py_cache, _vendor_py_resolved
-    _vendor_py_cache = None
-    _vendor_py_resolved = False
-
-
-def _discover_py311():
-    try:
-        r = subprocess.run(
-            ["py", "-3.11", "-c", "import sys; print(sys.executable)"],
-            capture_output=True, text=True, timeout=8,
-        )
-    except Exception:
-        return None
-    exe = (r.stdout or "").strip()
-    if r.returncode == 0 and exe and os.path.isfile(exe):
-        return exe
-    return None
-
-
 def _vendor_python():
-    """能加载 vendor 原生扩展的解释器：当前 3.11，或 Windows py -3.11。找不到返回 None。"""
-    global _vendor_py_cache, _vendor_py_resolved
-    if _vendor_py_resolved:
-        return _vendor_py_cache
-    _vendor_py_resolved = True
-    if sys.version_info[:2] == (3, 11):
-        _vendor_py_cache = sys.executable
-        return _vendor_py_cache
-    _vendor_py_cache = _discover_py311()
-    return _vendor_py_cache
+    """当前进程的解释器。vendor 原生扩展按这个版本打包。"""
+    return sys.executable or None
 
 
 def _vendor_abi_hint():
-    if sys.version_info[:2] == (3, 11):
-        return ""
     ver = "%d.%d" % (sys.version_info[0], sys.version_info[1])
     return (
-        " vendor 的 lxml/greenlet 是 CPython 3.11，当前是 %s。"
-        "请安装 3.11 后用 py -3.11 agent.py，或把 py launcher 默认改成 3.11。"
-    ) % ver
-
-
-def _apply_vendor_python_path(env):
-    py = _vendor_python()
-    if py:
-        bindir = os.path.dirname(os.path.abspath(py))
-        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
-    return env
+        " vendor 与解释器不匹配，不要搜索其他 python。"
+        " 当前解释器: %s (%s)。"
+    ) % (sys.executable, ver)
 
 
 def _shell_env():
-    """子进程环境：vendor 在 PYTHONPATH 最前，3.11 在 PATH 最前，stdout 用 UTF-8。"""
+    """子进程环境：vendor 在 PYTHONPATH 最前，stdout 用 UTF-8。"""
     env = os.environ.copy()
     vendor = _vendor_dir()
     old = env.get("PYTHONPATH", "")
@@ -1101,7 +1079,7 @@ def _shell_env():
         env["TASK_TEMP"] = task_temp()
     except OSError:
         pass
-    return _apply_vendor_python_path(env)
+    return env
 
 
 def _matching_paren(src, open_idx):
@@ -1319,15 +1297,48 @@ def _format_finished(job, command):
     return result
 
 
+_FIRST_OUTPUT_WAIT = 1.0  # 转入后台时，日志仍空则最多再等这么久拿首包
+
+
+def _log_size(job):
+    try:
+        return os.path.getsize(job.log_path)
+    except OSError:
+        return 0
+
+
+def _wait_first_output(job, seconds):
+    """进程还在跑且日志仍空时，最多再等 seconds 秒。有新字节或进程结束即返回。"""
+    end = time.time() + max(0, seconds)
+    while job.ended is None and time.time() < end:
+        if _log_size(job) > (job.read_pos or 0):
+            return
+        time.sleep(0.05)
+
+
+def _after_foreground(job, command):
+    """前台等待结束后：仍在跑且日志为空，再等一小段首包，然后格式化。"""
+    if job.ended is None and _log_size(job) <= (job.read_pos or 0):
+        _wait_first_output(job, _FIRST_OUTPUT_WAIT)
+    if job.ended is not None:
+        return _format_finished(job, command)
+    return _format_running(job, command)
+
+
 def _format_running(job, command):
     output = _read_job_new(job).strip()
-    text = (
-        "$ {}\n已转入后台，任务 {} 仍在运行（没有被终止）。"
-        "用 job 工具 action=output 查看新输出，action=kill 停止。日志: {}"
-    ).format(command, job.id, job.log_path)
     if output:
+        text = (
+            "$ {}\n已转入后台，任务 {} 仍在运行（没有被终止）。"
+            "用 job 工具 action=output 查看新输出，action=kill 停止。日志: {}"
+        ).format(command, job.id, job.log_path)
         text += "\n目前输出:\n" + _cap_output(output, job.id)
-    return text
+        return text
+    return (
+        "$ {}\n已转入后台，任务 {} 仍在运行（没有被终止）。"
+        "日志可能还没写入。用 job 工具 action=output，并带上 wait_sec 再看；"
+        "action=kill 停止。日志: {}"
+    ).format(command, job.id, job.log_path)
 
 
 def running_jobs_note():
@@ -1376,13 +1387,15 @@ def _exec_shell(args, confirm_fn=None):
         return self_kill
     job = _spawn_process(_detect_shell() + [command], command)
     _wait_job(job, wait)
-    if job.ended is not None:
-        return _format_finished(job, command)
-    return _format_running(job, command)
+    return _after_foreground(job, command)
+
+
+def _script_keep_note(script):
+    return "\n脚本保留至本任务结束: {}。要改就 edit_file 这个文件，不要另写一份。".format(script)
 
 
 def _exec_python(args):
-    """内联执行 Python。成功且未指定 save_as 时删除临时脚本。"""
+    """内联执行 Python。脚本留在任务目录，任务结束且没有未完成待办时再清理。"""
     code = args.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Error: code required"
@@ -1401,25 +1414,106 @@ def _exec_python(args):
     if save_as:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(script, str(dest))
-    py = _vendor_python() or sys.executable
+    py = sys.executable
     label = "python {}".format(os.path.basename(script))
     job = _spawn_process([py, script], label, script=script)
     wait = _bounded_timeout(args.get("timeout", AUTO_BG_SEC), AUTO_BG_SEC)
     _wait_job(job, wait)
+    if job.ended is None and _log_size(job) <= (job.read_pos or 0):
+        _wait_first_output(job, _FIRST_OUTPUT_WAIT)
+    keep = _script_keep_note(script)
     if job.ended is None:
-        return _format_running(job, label) + "\n脚本: {}（结束后若成功会自动删除）".format(script)
-    if job.returncode == 0 and not save_as:
-        try:
-            os.remove(script)
-        except OSError:
-            pass
-        job.script = None
-    text = _format_finished(job, label)
-    if job.returncode and job.script and os.path.exists(job.script):
-        text += "\n脚本已保留: {}（可用 edit_file 修改后用 shell 重跑）".format(job.script)
+        return _format_running(job, label) + keep
+    text = _format_finished(job, label) + keep
     if save_as and job.returncode == 0:
         text += "\n脚本已保存: {}".format(dest)
     return text
+
+
+def _preview_script():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_preview.py")
+
+
+def _parse_preview_payload(text):
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "ok" in obj:
+            return obj
+    return None
+
+
+def _vision_enabled():
+    try:
+        import llm as _llm
+        return _llm.CAPABILITY.get("vision") is not False
+    except Exception:
+        return True
+
+
+def _format_preview_payload(payload):
+    if not payload.get("ok"):
+        return payload.get("error") or "页面没打开。报告原因并停止。不要安装浏览器，不要另写验收脚本。"
+    shots = payload.get("shots") or {}
+    lines = [
+        "title: {}".format(payload.get("title") or ""),
+        "console_errors: {}".format(json.dumps(payload.get("errors") or [], ensure_ascii=False)),
+    ]
+    for name in ("desktop", "mobile"):
+        lines.append("{}: {}".format(name, shots.get(name) or ""))
+    if _vision_enabled():
+        for name in ("desktop", "mobile"):
+            path = shots.get(name)
+            if not path or not os.path.isfile(path):
+                continue
+            if len(PENDING_IMAGES) >= vision.MAX_IMAGES_PER_REQUEST:
+                break
+            try:
+                data_url, _note = vision.encode_for_llm(path)
+            except (FileNotFoundError, ValueError, OSError):
+                continue
+            PENDING_IMAGES.append(data_url)
+        lines.append("截图已附在下一轮。直接根据画面改页面。不要自己写 Playwright。")
+    else:
+        lines.append("当前模型不支持图像分析。正文摘要：")
+        lines.append((payload.get("excerpt") or "")[:2000])
+    return "\n".join(lines)
+
+
+def _exec_preview_page(args):
+    """用当前解释器跑仓库里的固定脚本，打开 Edge 并截图。"""
+    url = str(args.get("url") or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "Error: url 须以 http:// 或 https:// 开头"
+    script = _preview_script()
+    out = task_temp()
+    label = "preview_page {}".format(url)
+    job = _spawn_process([sys.executable, script, url, out], label)
+    _wait_job(job, 60)
+    if job.ended is None and _log_size(job) <= (job.read_pos or 0):
+        _wait_first_output(job, _FIRST_OUTPUT_WAIT)
+    if job.ended is None:
+        return _format_running(job, label) + "\n页面还在打开。不要另写验收脚本。"
+    if getattr(job, "_spawn_error", None):
+        return _format_finished(job, label)
+    raw = _read_job_new(job).strip()
+    payload = _parse_preview_payload(raw)
+    if payload is None:
+        text = "$ {}\n".format(label)
+        if job.returncode:
+            text += "[exit code: {}]\n".format(job.returncode)
+        text += raw or "(no output)"
+        blob = text.lower()
+        if "greenlet" in blob or "lxml" in blob or "dll load failed" in blob:
+            if "不要搜索其他 python" not in text:
+                text += _vendor_abi_hint()
+        return text
+    return _format_preview_payload(payload)
 
 
 def _exec_job(args):

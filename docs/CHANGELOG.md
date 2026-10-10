@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.3 — 2026-10-10
+
+vendor 原生扩展换成 CPython 3.14，任务脚本不再中途删掉，页面验收改为固定工具。
+
+- lxml、greenlet、numpy、pandas、Pillow、pydantic-core 换成同版本 `cp314-win_amd64`。`python` 工具和 shell 用启动本进程的解释器，不再查找 `py -3.11`
+- 导入失败时只报告当前解释器，并写明不要搜索其他 python
+- temp 里成功写下的 `.py` `.ps1` `.bat` `.cmd` 计入产出。笔记和 json 不计。Qwen 档硬上限仍是 200
+- `python` 工具的脚本留到本轮结束、且没有未完成待办时，才由 `clean_task` 清理
+- 新工具 `preview_page`：用系统 Edge 在 1440×900 和 390×844 截图。打不开就停，不要自己写 Playwright
+
+## 3.2 — 2026-10-07
+
+技能子进程不再按系统 GBK 解码，后台任务转入时会等一小段首包。
+
+- 脚本技能收集字节，按 utf-8 → gb18030 → locale 解码；环境与 shell 对齐，带 `PYTHONIOENCODING=utf-8` 和 `TASK_TEMP`
+- 自动转入后台且日志仍空时，最多再等约 1 秒。仍空则说明日志可能还没写入，并提示 `wait_sec`
+- `job action=output` 未传 `wait_sec` 时仍立即返回
+- `skills/网页验收.md`：Edge 启动失败或页面打不开，报告原因并停，不改 Playwright / vendor / asyncio
+
 ## 3.1 — 2026-10-03
 
 上下文改为只追加，长任务按进展停，并补上离线建站所需的工具和依赖。

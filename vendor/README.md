@@ -2,7 +2,7 @@
 
 脚本 skill 运行时会把本目录加进 `PYTHONPATH`。核心 5 个工具不从这里 import。
 
-当前 vendor 原生扩展是 CPython **3.11** win_amd64。换别的版本要重装 numpy / pandas / lxml / greenlet / Pillow 等原生 wheel。办公机请用 `py -3.11 agent.py`（系统默认 3.14 加载不了这些 `.pyd`）。
+当前 vendor 原生扩展是 CPython **3.14** win_amd64（2026-10-10 起，同版本轮子替换了原来的 cp311）。请用 Python 3.14 启动 `agent.py`。换别的版本要重装 numpy / pandas / lxml / greenlet / Pillow / pydantic-core。
 
 ## 已打入（实测 2026-09-09）
 
@@ -14,7 +14,7 @@
 | pandas + numpy | 3.0.5 / 2.4.6 | 73MB |
 | Pillow | 12.3.0 | 14MB（pptx 依赖） |
 | python-docx + lxml | 1.2.0 / 6.1.3 | ~10MB |
-| fastapi + uvicorn + starlette + pydantic | 0.142.2 / 0.54.0 / 1.7.0 / 2.13.5 | ~5MB（pydantic-core 为 cp311 win_amd64） |
+| fastapi + uvicorn + starlette + pydantic | 0.142.2 / 0.54.0 / 1.7.0 / 2.13.5 | ~5MB（pydantic-core 为 cp314 win_amd64） |
 | pypdf | 6.18.0 | ~2MB |
 | python-pptx | 1.0.2 | ~1.2MB |
 | openpyxl + et_xmlfile | 3.1.5 | ~1MB |
@@ -31,6 +31,6 @@
 
 ## 未打
 
-Playwright 浏览器本体。验收自己做的页面时用系统 Edge：`channel="msedge"`，见 `skills/网页验收.md`。不要默认执行 `playwright install chromium`。
+Playwright 浏览器本体。验收自己做的页面时用工具 `preview_page`（系统 Edge，1440 与 390）。不要默认执行 `playwright install chromium`，也不要自己写 Playwright。
 
 本机已有的 WPS / Word / `soffice` / Edge 用 `shell` 调即可。

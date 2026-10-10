@@ -1,8 +1,8 @@
-# agent_in 3.1
+# agent_in 3.3
 
-极简 CLI Agent。11 个工具：`read_file`、`write_file`、`edit_file`、`shell`、`python`、`job`、`todo_write`、`ask_user`、`view_image`、`glob`、`grep`。
+极简 CLI Agent。12 个工具：`read_file`、`write_file`、`edit_file`、`shell`、`python`、`preview_page`、`job`、`todo_write`、`ask_user`、`view_image`、`glob`、`grep`。
 
-当前产品版本 **3.1**（只追加上下文、按进展停机、离线建站工具）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
+当前产品版本 **3.3**（vendor 原生扩展为 CPython 3.14；temp 里的任务脚本算产出，并留到任务结束再清理；自己做的页面用 `preview_page` 打开 Edge 截图）。启动横幅、`python agent.py -V`、`/status` 显示同一版本号。
 
 技能是文件，不是新 function。模型默认看不见 `/use`。
 
@@ -30,7 +30,7 @@ python agent.py -V
 
 `/ls skills` 列出两类。不要对模型注册 `skill_*`。
 
-`vendor/` 办公套件：openpyxl、python-docx、python-pptx、pypdf、pandas、Playwright，以及 FastAPI / uvicorn / pydantic（cp311）。前端单文件在 `vendor/web/`（Vue 3、ECharts），不经 npm。脚本 skill 运行时自动加 `PYTHONPATH`。Playwright **不含** Chromium；验收页面用系统 Edge（`channel="msedge"`）。详见 `vendor/README.md`。
+`vendor/` 办公套件：openpyxl、python-docx、python-pptx、pypdf、pandas、Playwright，以及 FastAPI / uvicorn / pydantic（原生扩展为 cp314）。前端单文件在 `vendor/web/`（Vue 3、ECharts），不经 npm。脚本 skill 运行时自动加 `PYTHONPATH`。Playwright **不含** Chromium；验收页面用 `preview_page`（系统 Edge）。详见 `vendor/README.md`。
 
 ## 文档与测试
 

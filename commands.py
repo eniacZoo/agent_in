@@ -344,6 +344,9 @@ _MODEL_ALIASES = {
     "qwen": "office",
     "qw": "office",
     "office": "office",
+    "home": "home",
+    "qwen-home": "home",
+    "openrouter": "home",
 }
 _EFFORTS = ("low", "medium", "xhigh")
 
@@ -406,11 +409,12 @@ def _cmd_model(state, arg):
         print(f"   {_c('/model deepseek', _C_CYAN)}  — DeepSeek  {provs.get('default', {}).get('model', '')}")
         print(f"   {_c('/model qwen [low|medium|xhigh]', _C_CYAN)}  — 办公 Qwen  {provs.get('office', {}).get('model', '')}")
         print(f"   {_c('/model office2 [low|medium|xhigh]', _C_CYAN)}  — office2  {provs.get('office2', {}).get('model', '')}")
+        print(f"   {_c('/model home [low|medium|xhigh]', _C_CYAN)}  — 家里 Qwen（OpenRouter）  {provs.get('home', {}).get('model', '')}")
         print()
         return
     target = _resolve_model_to_provider(provider_arg)
     if target is None:
-        print(f"  {_c(ui.ICO_FAIL + ' 未知模型，用 /model deepseek、/model qwen 或 /model office2', _C_RED)}")
+        print(f"  {_c(ui.ICO_FAIL + ' 未知模型，用 /model deepseek、/model qwen、/model office2 或 /model home', _C_RED)}")
         return
     _switch_to_provider(state, target)
 

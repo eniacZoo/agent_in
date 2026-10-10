@@ -31,6 +31,8 @@ class Plan12Tests(unittest.TestCase):
         self.assertEqual(env.get("PYTHONIOENCODING"), "utf-8")
 
     def test_exec_shell_imports_pptx(self):
+        if sys.version_info[:2] != (3, 14):
+            self.skipTest("vendor native extensions are CPython 3.14")
         r = tools._exec_shell({
             "command": 'python -c "import pptx; print(pptx.__version__)"',
         })
@@ -78,7 +80,7 @@ class Plan12Tests(unittest.TestCase):
         self.assertEqual(
             names,
             ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
-             "python", "job", "todo_write", "ask_user"],
+             "python", "preview_page", "job", "todo_write", "ask_user"],
         )
 
 

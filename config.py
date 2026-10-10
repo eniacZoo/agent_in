@@ -226,8 +226,14 @@ OUTPUT_MARGIN_TOKENS = 4096
 
 
 def profile_kind(name) -> str:
-    """office* 是本地 Qwen；其余按 DeepSeek 云端档。"""
-    return "qwen" if str(name or "").lower().startswith("office") else "deepseek"
+    """office* 以及 kind=qwen 的 provider（如家里的 OpenRouter）用 Qwen 档；其余按 DeepSeek。"""
+    n = str(name or "")
+    if n.lower().startswith("office"):
+        return "qwen"
+    pdict = (load().get("providers") or {}).get(n) or {}
+    if isinstance(pdict, dict) and str(pdict.get("kind") or "").lower() == "qwen":
+        return "qwen"
+    return "deepseek"
 
 
 def profile_for(name=None) -> dict:
@@ -267,9 +273,16 @@ def compact_trigger(prof: dict) -> int:
 def save(cfg: dict) -> Path:
     """
     将配置落盘到 agent_config.json。
-    只写白名单 key。
+    只写白名单 key。与内置默认值相同的项不落盘，避免盖住按模型分的预算档。
+    provider / providers 始终保留。
     """
-    clean = {k: v for k, v in cfg.items() if k in _WHITELIST}
+    clean = {}
+    for k, v in cfg.items():
+        if k not in _WHITELIST:
+            continue
+        if k not in ("provider", "providers") and v == _DEFAULTS.get(k):
+            continue
+        clean[k] = v
     p = path()
     p.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
     global _config_cache

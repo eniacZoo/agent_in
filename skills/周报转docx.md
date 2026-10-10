@@ -18,7 +18,7 @@
 3. 转 Word（有什么用什么，不要假设 Linux 已装包）：
    - 本机有 `soffice`：`shell` 执行 `soffice --headless --convert-to docx 周报.md`
    - 本机有 `pandoc`：`pandoc 周报.md -o 周报.docx`
-   - 都没有：项目 `vendor/` 里有 python-docx。写一段短脚本生成 `.docx`，运行时把 `PYTHONPATH` 指到 `vendor/`（lxml 是 CPython 3.11 win_amd64；办公机请用 `py -3.11`）
+   - 都没有：项目 `vendor/` 里有 python-docx。写一段短脚本生成 `.docx`，运行时把 `PYTHONPATH` 指到 `vendor/`（lxml 是 CPython 3.14 win_amd64；办公机请用 `py -3.14`）
    - 再没有：保留 `周报.md`，告诉用户用 WPS / Word 打开另存为 `.docx`
 4. 不要删除原始记录。不要对 `C:\Windows` 或工作目录外写文件。
 

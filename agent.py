@@ -12,7 +12,6 @@ agent.py — CLI 入口（对应 PI 的 coding-agent）
 """
 import argparse
 import os
-import subprocess
 import sys
 import uuid
 
@@ -342,36 +341,8 @@ def run_interactive(work_dir, model=None, resume=None, session_id=None, probe=No
     print("  bye\n")
 
 
-def _maybe_reexec_vendor_python():
-    """办公机默认 3.14 时，切到能加载 vendor 原生扩展的 3.11。AGENT_NO_REEXEC=1 跳过。"""
-    if os.environ.get("AGENT_NO_REEXEC") == "1":
-        return
-    if sys.version_info[:2] == (3, 11):
-        return
-    exe = tools._vendor_python()
-    if not exe:
-        return
-    if os.path.normcase(os.path.abspath(exe)) == os.path.normcase(os.path.abspath(sys.executable)):
-        return
-    argv = [exe] + sys.argv
-    if sys.platform == "win32":
-        # Windows 的 execv 会另起进程后立刻退出，PowerShell 先回到提示符，横幅再写进去。
-        try:
-            rc = subprocess.call(argv)
-        except OSError:
-            return
-        except KeyboardInterrupt:
-            sys.exit(130)
-        sys.exit(rc)
-    try:
-        os.execv(exe, argv)
-    except OSError:
-        return
-
-
 def main():
     """解析 CLI，接线 config → providers → WORK_DIR/SAFE_MODE，再进单次或交互。"""
-    _maybe_reexec_vendor_python()
     parser = argparse.ArgumentParser(
         description="agent_in {} — Minimal CLI Agent".format(ui.APP_VERSION),
         formatter_class=argparse.RawDescriptionHelpFormatter,

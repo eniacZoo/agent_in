@@ -74,22 +74,104 @@ def connection_fail_text(model=None):
     return f"无法连接模型：[{name}][{mid}]，请尝试使用/model、/provider命令进行切换"
 
 
-def _attach_thinking(payload, think=None):
-    """办公 Qwen / office2 带上 enable_thinking + reasoning_effort；DeepSeek 不发。
-    think=False：显式关闭思考（压缩摘要等不需要推理的调用）。"""
-    if not str(providers.get_active_name() or "").startswith("office"):
-        return
-    if think is False:
-        payload["enable_thinking"] = False
-        return
+def _thinking_effort():
     try:
         effort = str(config.profile_for(providers.get_active_name()).get("reasoning_effort", "low") or "low").lower()
     except Exception:
         effort = str(config.get("reasoning_effort", "low") or "low").lower()
     if effort not in REASONING_EFFORTS:
-        effort = "low"
+        return "low"
+    return effort
+
+
+def _provider_request():
+    """当前 provider 若写了 request，原样并进请求体（OpenRouter 的 reasoning / provider 路由）。"""
+    name = providers.get_active_name()
+    pdict = (config.get("providers") or {}).get(name) or {}
+    if not isinstance(pdict, dict):
+        return None
+    extra = pdict.get("request")
+    return extra if isinstance(extra, dict) and extra else None
+
+
+def _attach_thinking(payload, think=None):
+    """办公 Qwen / office2 带上 enable_thinking + reasoning_effort。
+    带 request 的 provider（家里的 OpenRouter）改发 reasoning 与指定路由。
+    think=False：显式关闭思考（压缩摘要等不需要推理的调用）。"""
+    extra = _provider_request()
+    if extra is not None:
+        import copy
+        body = copy.deepcopy(extra)
+        reasoning = body.get("reasoning")
+        if not isinstance(reasoning, dict):
+            reasoning = {}
+            body["reasoning"] = reasoning
+        if think is False:
+            reasoning["enabled"] = False
+            reasoning.pop("effort", None)
+        else:
+            reasoning.setdefault("enabled", True)
+            effort = _thinking_effort()
+            if effort in ("medium", "xhigh"):
+                reasoning["effort"] = "high" if effort == "xhigh" else effort
+        payload.update(body)
+        return
+    if not str(providers.get_active_name() or "").startswith("office"):
+        return
+    if think is False:
+        payload["enable_thinking"] = False
+        return
     payload["enable_thinking"] = True
-    payload["reasoning_effort"] = effort
+    payload["reasoning_effort"] = _thinking_effort()
+
+
+def _merge_reasoning_details(acc, incoming):
+    """把流式 reasoning_details 按 index 拼回去，下一次请求原样回传。"""
+    if not isinstance(incoming, list):
+        return list(acc or [])
+    import copy
+    acc = list(acc or [])
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index", 0)
+        typ = item.get("type")
+        found = None
+        for prev in acc:
+            if prev.get("index", 0) == idx and prev.get("type") == typ:
+                found = prev
+                break
+        if found is None:
+            acc.append(copy.deepcopy(item))
+            continue
+        for key in ("text", "summary"):
+            new = item.get(key)
+            old = found.get(key)
+            if not isinstance(new, str):
+                continue
+            if not isinstance(old, str) or not old:
+                found[key] = new
+            elif new.startswith(old):
+                found[key] = new
+            elif old.endswith(new):
+                continue
+            else:
+                found[key] = old + new
+        for key, value in item.items():
+            if key not in found:
+                found[key] = copy.deepcopy(value)
+    return acc
+
+
+def _details_text(details):
+    parts = []
+    for item in details or []:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text") or item.get("summary") or ""
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +220,9 @@ def _sanitize_messages(messages):
     out = []
     for m in messages:
         d = {k: v for k, v in m.items() if k in _API_MSG_KEYS}
-        if m.get("_keep_reasoning") and m.get("reasoning_content"):
+        if m.get("_keep_reasoning") and m.get("reasoning_details"):
+            d["reasoning_details"] = m["reasoning_details"]
+        elif m.get("_keep_reasoning") and m.get("reasoning_content"):
             d["reasoning_content"] = m["reasoning_content"]
         out.append(d)
     return out
@@ -249,6 +333,46 @@ def _sleep_backoff(attempt: int) -> None:
         time.sleep(delay)
 
 
+def _affordable_tokens(body):
+    """OpenRouter 402 正文里的「本次最多还能预留多少输出 token」。"""
+    import re
+    m = re.search(r"can only afford (\d+)", body or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _lower_max_tokens(req, affordable):
+    """把请求的 max_tokens 降到余额够预留的范围。改不成则返回 False。"""
+    try:
+        payload = json.loads(req.data.decode("utf-8"))
+    except Exception:
+        return False
+    try:
+        current = int(payload.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        return False
+    new = int(affordable) - 256
+    if new < 256 or new >= current:
+        return False
+    payload["max_tokens"] = new
+    req.data = json.dumps(payload).encode("utf-8")
+    return True
+
+
+def _credit_fail_text(body):
+    n = _affordable_tokens(body)
+    if n:
+        return (
+            "OpenRouter 余额不够预留这次输出（这次最多约 {} token）。"
+            "请到 openrouter.ai/settings/credits 充值，或把该 provider 的 max_tokens 调低。"
+        ).format(n)
+    return "OpenRouter 余额不足。请充值，或把该 provider 的 max_tokens 调低。"
+
+
 def _open_with_retry(req, on_429=None):
     """
     H1: 建立连接（urlopen），**仅连接阶段重试**。
@@ -265,6 +389,7 @@ def _open_with_retry(req, on_429=None):
     max_r = retry.max_retries()
     last_code = None
     last_body = ""
+    credit_capped = False
     for attempt in range(max_r + 1):
         try:
             resp = urllib.request.urlopen(req, timeout=TIMEOUT)
@@ -278,6 +403,12 @@ def _open_with_retry(req, on_429=None):
                     on_429(e.headers.get("Retry-After") if e.headers else None)
                 except Exception:
                     pass
+            if e.code == 402 and not credit_capped:
+                affordable = _affordable_tokens(last_body)
+                if affordable and _lower_max_tokens(req, affordable):
+                    credit_capped = True
+                    logger.warn("openrouter_credit_cap", {"max_tokens": affordable - 256})
+                    continue
             if retry.is_retryable_status(e.code) and attempt < max_r:
                 _sleep_backoff(attempt)
                 logger.warn("llm_retry", {"attempt": attempt, "status": e.code})
@@ -298,7 +429,10 @@ def _open_with_retry(req, on_429=None):
         logger.error("llm_error", {"status": last_code, "error": last_body[:200]})
     else:
         logger.error("llm_error", {"error": last_body[:200]})
-    err_chunk = {"type": "error", "content": connection_fail_text()}
+    if last_code == 402:
+        err_chunk = {"type": "error", "content": _credit_fail_text(last_body)}
+    else:
+        err_chunk = {"type": "error", "content": connection_fail_text()}
     _check_consecutive_failures()
     return None, err_chunk
 
@@ -332,8 +466,14 @@ def _chat_non_stream(req, on_429=None):
     if choices:
         finish = choices[0].get("finish_reason") or ""
         msg = choices[0].get("message", {})
-        # reasoning
+        details = msg.get("reasoning_details")
+        if isinstance(details, list) and details:
+            yield {"type": "reasoning_details", "details": details}
         reasoning = msg.get("reasoning_content") or msg.get("thinking") or ""
+        if not reasoning and isinstance(msg.get("reasoning"), str):
+            reasoning = msg.get("reasoning")
+        if not reasoning and isinstance(details, list):
+            reasoning = _details_text(details)
         if reasoning:
             yield {"type": "reasoning", "content": reasoning}
         # text
@@ -377,6 +517,7 @@ def _chat_stream(req, on_429=None):
 
     # 用于拼接 tool_call arguments（可能分多个 chunk 到达）
     pending_tool_calls = {}  # index -> {"id":..., "name":..., "args_parts": []}
+    reasoning_details = []
 
     stream_ok = True
     finish = ""
@@ -412,11 +553,21 @@ def _chat_stream(req, on_429=None):
                 delta = choices[0].get("delta", {})
 
                 # --- reasoning / thinking ---
+                incoming = delta.get("reasoning_details")
+                if not incoming:
+                    message = choices[0].get("message") or {}
+                    incoming = message.get("reasoning_details")
+                before = _details_text(reasoning_details) if incoming else ""
+                if incoming:
+                    reasoning_details = _merge_reasoning_details(reasoning_details, incoming)
                 reasoning = (
                     delta.get("reasoning_content", "")
                     or delta.get("reasoning", "")
                     or delta.get("thinking", "")
                 )
+                if not reasoning and incoming:
+                    after = _details_text(reasoning_details)
+                    reasoning = after[len(before):] if after.startswith(before) else ""
                 if reasoning:
                     yield {"type": "reasoning", "content": reasoning}
 
@@ -468,6 +619,8 @@ def _chat_stream(req, on_429=None):
             "truncated": bad,
         }
 
+    if reasoning_details:
+        yield {"type": "reasoning_details", "details": reasoning_details}
     if finish:
         yield {"type": "finish", "reason": finish}
     yield {"type": "done"}
@@ -507,6 +660,7 @@ def check_connection(model=None, probe=None):
         "max_tokens": 1,
         "stream": False,
     }
+    _attach_thinking(payload, think=False)
     req = urllib.request.Request(
         f"{BASE_URL}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),

@@ -43,7 +43,7 @@ class Plan19Tests(unittest.TestCase):
         self.assertEqual(
             names,
             ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
-             "python", "job", "todo_write", "ask_user"],
+             "python", "preview_page", "job", "todo_write", "ask_user"],
         )
 
 

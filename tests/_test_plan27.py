@@ -210,18 +210,19 @@ class ToolTests(unittest.TestCase):
         tools.SESSION_ID = self.old_sid
         shutil.rmtree(self.td, ignore_errors=True)
 
-    def test_python_deletes_script_on_success(self):
+    def test_python_keeps_script_on_success(self):
         r = tools._exec_python({"code": "print(1 + 1)\n"})
         self.assertIn("2", r)
-        self.assertNotIn("Error", r)
+        self.assertIn("脚本保留至本任务结束", r)
+        self.assertNotIn("Error", r.split("脚本保留", 1)[0])
         run = os.path.join(taskdir.task_dir(self.td, "p27", create=False), "run")
-        left = os.listdir(run) if os.path.isdir(run) else []
-        self.assertEqual(left, [])
+        left = [n for n in os.listdir(run) if n.endswith(".py")] if os.path.isdir(run) else []
+        self.assertEqual(len(left), 1)
 
     def test_python_keeps_script_on_failure(self):
         r = tools._exec_python({"code": "raise SystemExit(2)\n"})
         self.assertIn("exit code", r)
-        self.assertIn("脚本已保留", r)
+        self.assertIn("脚本保留至本任务结束", r)
 
     def test_shell_moves_slow_command_to_background(self):
         r = tools._exec_shell({"command": "Start-Sleep -Seconds 4", "timeout": 1})

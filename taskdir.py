@@ -10,7 +10,7 @@ taskdir.py — 任务临时目录的生命周期（P4，叶子模块，仅 stdli
   task_notes.md  长任务笔记（原来共用的 temp/task_notes.md，现按任务隔离）
   jobs/          后台任务日志（P3）
   out/           被截断的大输出全文（P3）
-  run/           python 工具的一次性脚本（P3，跑完即删）
+  run/           python 工具的脚本（任务结束且没有未完成待办时清理）
 
 规则：
   * 每个会话一个目录；恢复会话沿用同一目录（session_id 不变）。

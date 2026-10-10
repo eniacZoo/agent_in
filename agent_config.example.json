@@ -20,6 +20,19 @@
       "base_url": "http://118.4.78.6:8088/api/v1",
       "api_key": "YOUR_OFFICE2_KEY",
       "model": "szicbc-claw-01"
+    },
+    "home": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "YOUR_OPENROUTER_KEY",
+      "model": "qwen/qwen3.8-27b",
+      "kind": "qwen",
+      "request": {
+        "reasoning": {"enabled": true},
+        "provider": {
+          "only": ["wafer"],
+          "allow_fallbacks": false
+        }
+      }
     }
   }
 }

@@ -12,7 +12,7 @@ import shutil
 
 
 W = 58  # 框线宽度
-APP_VERSION = "3.1"  # 产品版本；只追加上下文、按进展停机、离线建站工具
+APP_VERSION = "3.3"  # 产品版本；vendor 为 CPython 3.14，页面验收用 preview_page
 
 # ---------------------------------------------------------------------------
 # 环境变量（v3.0）
@@ -768,7 +768,7 @@ def print_help():
     print("     /fork [id]           — 把叶设到某条消息，下一句分叉")
     print("     /config              — 当前配置")
     print("     /provider [name]     — 切换 provider")
-    print("     /model [deepseek|qwen|office2] [low|medium|xhigh] — 切换模型 / 思考强度")
+    print("     /model [deepseek|qwen|office2|home] [low|medium|xhigh] — 切换模型 / 思考强度")
     print("     /probe [force]       — 探测模型能力")
     print("     /memory              — 查看记忆")
     print("     /memory add <text>   — 追加记忆")

@@ -57,7 +57,7 @@ TURN_LEDGER = []            # 本会话已完成的关键操作，跨回合保�
 LEDGER_MAX_LINES = 40
 LEDGER_LINE_MAX = 120
 DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本地机器上。
-可用工具：read_file、write_file、edit_file、shell、python、job、todo_write、ask_user、view_image、glob、grep。
+可用工具：read_file、write_file、edit_file、shell、python、preview_page、job、todo_write、ask_user、view_image、glob、grep。
 
 规则：
 1. 简洁，直接执行，不要寒暄
@@ -67,7 +67,7 @@ DEFAULT_SYSTEM_PROMPT = """你是一个极简 CLI Agent，运行在用户的本�
 5. 用户提到图片时先 view_image
 6. 完成后用 1-2 句话总结
 7. 办公文件先 read_file 对应流程（不要一次读完全部）：skills/xlsx.md、skills/docx.md、skills/pptx.md、skills/pdf.md；网页 skills/网页.md。周报见 skills/周报转docx.md（先读 docx.md）；翻译见 skills/翻译.md（PDF 先读 pdf.md）。表格拆分入库见 skills/数据拆分入库.md；可编辑的数据展示系统见 skills/数据管理系统.md；页面验收见 skills/网页验收.md。包在 vendor/，shell 和 python 工具已带 PYTHONPATH。禁止 pip/npm/conda install。不要虚构 skill 工具。探结构只把摘要写入 temp/，写一份脚本再跑，报错改脚本，不要把整表整文打进对话。长任务摘要写入 task_notes.md
-8. 声称做完之前必须有工具输出当证据（跑过、对过数量、打开过页面）。没有证据就不要说完成
+8. 声称做完之前必须有工具输出当证据（跑过、对过数量、用 preview_page 打开过页面）。不要自己写 Playwright。没有证据就不要说完成
 9. 排障先用工具验证假设，确认原因后再改代码
 10. 校验失败时修解析或修数据，禁止把校验改成恒为真来换一份通过的报告
 11. 探查脚本和大输出只放本任务临时目录 task_temp（见下方），不要写进交付目录。短 Python 用 python 工具，不要用 shell 里的 python -c。超过三步先用 todo_write；要用户拍板时用 ask_user，推荐项放第一个。用户输入 /continue 时，从交接摘要的下一步接着做，不要从头再来
@@ -160,6 +160,33 @@ def _is_product_write(path, work_dir=None):
     if not str(path or ""):
         return False
     return not _is_temp_path(path, work_dir)
+
+
+_TASK_SCRIPT_EXT = (".py", ".ps1", ".bat", ".cmd")
+
+
+def is_task_script(path, work_dir=None):
+    """temp 下的任务脚本。笔记、json、日志、截图不算。"""
+    if not _is_temp_path(path, work_dir):
+        return False
+    _, rp = _resolved_tool_path(path, work_dir)
+    if not rp:
+        return False
+    return os.path.splitext(rp)[1].lower() in _TASK_SCRIPT_EXT
+
+
+def counts_as_output(tool_name, path, ok, work_dir=None):
+    """用户侧文件，或 temp 里成功写下的任务脚本，算这一轮的产出。"""
+    if not ok:
+        return False
+    if tool_name in ("write_file", "edit_file"):
+        return _is_product_write(path, work_dir) or is_task_script(path, work_dir)
+    return False
+
+
+def python_script_counts(result):
+    """python 工具留下了任务脚本。"""
+    return "脚本保留至本任务结束" in (result or "")
 
 
 def _shell_mutates_temp(command, work_dir=None):
@@ -578,7 +605,9 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                 if m.get("role") == "user" and m.get("name") not in ("context_summary", context.COMPACT_MARK):
                     last_user = i
             for m in window[last_user + 1:]:
-                if m.get("role") == "assistant" and m.get("reasoning_content"):
+                if m.get("role") == "assistant" and (
+                    m.get("reasoning_content") or m.get("reasoning_details")
+                ):
                     m["_keep_reasoning"] = True
         return window
 
@@ -612,6 +641,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         text_parts = []
         tool_calls = []
         reasoning_parts = []
+        reasoning_details = None
         finish_reason = ""
 
         window = _build_window()
@@ -626,6 +656,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                         text_parts.append(chunk["content"])
                     elif ctype == "reasoning":
                         reasoning_parts.append(chunk.get("content") or "")
+                elif ctype == "reasoning_details":
+                    reasoning_details = chunk.get("details")
                 elif ctype == "tool_call":
                     tool_calls.append(chunk)
                     disp.handle(chunk)
@@ -671,6 +703,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
             asst = {"role": "assistant", "content": current_text}
             if reasoning_parts:
                 asst["reasoning_content"] = "".join(reasoning_parts)
+            if reasoning_details:
+                asst["reasoning_details"] = reasoning_details
             transcript.append(asst)
             if finish_reason == "length" and length_retries < 1:
                 length_retries += 1
@@ -696,6 +730,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
         assistant_msg = {"role": "assistant", "content": current_text or None}
         if reasoning_parts:
             assistant_msg["reasoning_content"] = "".join(reasoning_parts)
+        if reasoning_details:
+            assistant_msg["reasoning_details"] = reasoning_details
         assistant_msg["tool_calls"] = [
             {
                 "id": tc["id"],
@@ -835,7 +871,7 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     _scratching = True
                 else:
                     _mutated = True
-                if _is_tool_ok(result) and _is_product_write(_path, work_dir):
+                if counts_as_output(tool_name, _path, _is_tool_ok(result), work_dir):
                     _writes_this_turn += 1
             elif tool_name == "shell":
                 cmd = str(tool_args.get("command", ""))
@@ -845,6 +881,8 @@ def agent_loop(messages, work_dir, session_id="", verbose=True, initial_images=N
                     ledger_add(f"shell {cmd[:80]} -> ok")
                     if _shell_wrote_product(cmd, result, work_dir, before=before_products):
                         _writes_this_turn += 1
+            elif tool_name == "python" and python_script_counts(result):
+                _writes_this_turn += 1
             last_call_ok[_sig] = _is_tool_ok(result)
             tel.tool_result(bool(last_call_ok[_sig]))
             _digest = hashlib.sha1((result or "")[:4000].encode("utf-8", "replace")).hexdigest()[:12]

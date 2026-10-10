@@ -160,22 +160,13 @@ def execute_skill(name, params, session_id=None, confirm_fn=None, input_fn=None)
         # 尝试直接执行
         cmd = [str(entry_path), json.dumps(params, ensure_ascii=False)]
 
-    env = os.environ.copy()
-    vendor = str(VENDOR_DIR)
-    old_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = vendor + os.pathsep + old_pp if old_pp else vendor
-    try:
-        import tools as _tools
-        _tools._apply_vendor_python_path(env)
-    except Exception:
-        pass
+    env = _skill_subprocess_env()
 
     t0 = time.time()
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
             timeout=SKILL_TIMEOUT,
             cwd=str(Path(os.environ.get("WORK_DIR", os.getcwd()))),
             env=env,
@@ -186,12 +177,14 @@ def execute_skill(name, params, session_id=None, confirm_fn=None, input_fn=None)
     except Exception as e:
         return "Error: Failed to run skill '{}': {}".format(name, e)
 
-    # 组装输出
+    # 组装输出。字节解码，避免 text=True 在中文 Windows 上按 GBK 读线程崩掉。
+    stdout = _decode_skill_output(proc.stdout)
+    stderr = _decode_skill_output(proc.stderr)
     parts = []
-    if proc.stdout:
-        parts.append(proc.stdout)
-    if proc.stderr:
-        parts.append("[stderr]\n" + proc.stderr)
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append("[stderr]\n" + stderr)
 
     output = "\n".join(parts).strip() if parts else "(no output)"
 
@@ -281,8 +274,33 @@ def _skill_security_gate(name, entry_path, session_id, confirm_fn, input_fn):
     return {"approved": True, "message": ""}
 
 
+def _skill_subprocess_env():
+    """与 shell 工具同一套环境：UTF-8 输出，并带上任务临时目录。"""
+    try:
+        import tools as _tools
+        return _tools._shell_env()
+    except Exception:
+        env = os.environ.copy()
+        vendor = str(VENDOR_DIR)
+        old_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = vendor + os.pathsep + old_pp if old_pp else vendor
+        env["PYTHONIOENCODING"] = "utf-8"
+        return env
+
+
+def _decode_skill_output(data):
+    """utf-8 → gb18030 → locale → replace。与 tools._decode_bytes 同一条链。"""
+    if not data:
+        return ""
+    try:
+        import tools as _tools
+        return _tools._decode_bytes(data)
+    except Exception:
+        return data.decode("utf-8", errors="replace")
+
+
 def _find_python():
-    """找可用的 python。优先能加载 vendor 的 3.11。"""
+    """当前进程的解释器。vendor 按这个版本打包。"""
     try:
         import tools as _tools
         py = _tools._vendor_python()

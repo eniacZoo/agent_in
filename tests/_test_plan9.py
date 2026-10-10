@@ -78,7 +78,7 @@ class Plan9SkillTests(unittest.TestCase):
         self.assertEqual(
             names,
             ["read_file", "write_file", "edit_file", "shell", "view_image", "glob", "grep",
-             "python", "job", "todo_write", "ask_user"],
+             "python", "preview_page", "job", "todo_write", "ask_user"],
         )
         self.assertFalse(any(n.startswith("skill_") for n in names))
         self.assertNotIn("load_skill", names)
@@ -129,21 +129,23 @@ class Plan9SkillTests(unittest.TestCase):
         sys.path.insert(0, vendor)
         try:
             import openpyxl
-            import docx
             import pypdf
+            self.assertTrue(hasattr(openpyxl, "load_workbook"))
+            self.assertTrue(hasattr(pypdf, "PdfReader"))
+            if sys.version_info[:2] != (3, 14):
+                return
+            import docx
             import pandas
             import pptx
             import playwright
             from playwright.sync_api import sync_playwright
+            self.assertTrue(hasattr(docx, "Document"))
+            self.assertTrue(hasattr(pandas, "DataFrame"))
+            self.assertTrue(hasattr(pptx, "Presentation"))
+            self.assertTrue(callable(sync_playwright))
         finally:
             if sys.path and sys.path[0] == vendor:
                 sys.path.pop(0)
-        self.assertTrue(hasattr(openpyxl, "load_workbook"))
-        self.assertTrue(hasattr(docx, "Document"))
-        self.assertTrue(hasattr(pypdf, "PdfReader"))
-        self.assertTrue(hasattr(pandas, "DataFrame"))
-        self.assertTrue(hasattr(pptx, "Presentation"))
-        self.assertTrue(callable(sync_playwright))
 
     def test_slash_read_skill(self):
         buf = io.StringIO()
